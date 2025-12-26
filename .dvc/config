@@ -1,0 +1,5 @@
+[core]
+    remote = yandex-s3
+['remote "yandex-s3"']
+    url = s3://mlops-example-228/
+    endpointurl = https://storage.yandexcloud.net

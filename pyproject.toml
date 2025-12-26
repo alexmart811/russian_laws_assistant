@@ -1,0 +1,45 @@
+[project]
+name = "russian-laws"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Alex Mart", email = "alexmartynov811@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.127.0",
+    "lightning>=2.6.0",
+    "numpy>=2.4.0",
+    "torch>=2.9.1",
+]
+
+[project.scripts]
+russian-laws = "russian_laws:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "dvc[s3]>=3.65.0",
+    "ipykernel>=7.1.0",
+    "pre-commit>=4.5.1",
+]
+
+[tool.ruff]
+line-length = 100
+format = { docstring-code-format = true }
+
+[tool.ruff.lint]
+select = [
+    # isort
+    "I",
+    # pycodestyle
+    "E", "W",
+    # Pyflakes
+    "F"
+]
+
+pycodestyle = { max-doc-length = 105 }
