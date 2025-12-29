@@ -1,0 +1,35 @@
+# Конфигурация для обучения retriever моделей
+# С текущими ресурсами не получилось обучить все модели
+# Поэтому используем модель rubert-base-cased-sentence
+models:
+  # - name: "ai-forever/ru-en-RoSBERTa"
+  #   save_name: "roberta_ru_en"
+  - name: "DeepPavlov/rubert-base-cased-sentence"
+    save_name: "rubert_base"
+
+# Параметры обучения
+training:
+  num_epochs: 1
+  batch_size: 4
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  warmup_steps: 100
+  gradient_accumulation_steps: 4
+  precision: "16-mixed"
+  gradient_checkpointing: true
+
+# Параметры негативных примеров
+negatives:
+  num_negatives: 4 # Количество негативов на один позитив
+  strategy: "same_codex" # random, same_codex, in_batch
+
+# Валидация
+validation:
+  eval_steps: 500
+  save_best_model: true
+  metric_for_best: "recall@10"
+
+# Сохранение моделей
+save:
+  dir: "data/models"
+  save_top_k: 1

@@ -1,0 +1,16 @@
+# Основной конфигурационный файл
+defaults:
+  - qdrant: default
+  - embedding: default
+  - train: default
+  - _self_
+
+# Общие настройки проекта
+project_name: russian_laws
+seed: 42
+
+# Пути к данным
+data:
+  train_queries: data/processed/train_queries.csv
+  test_queries: data/processed/test_queries.csv
+  articles: data/processed/articles_indexed.csv

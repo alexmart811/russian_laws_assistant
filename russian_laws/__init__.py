@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from russian-laws!")
+"""Russian Laws RAG Service."""

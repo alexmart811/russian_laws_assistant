@@ -1,0 +1,19 @@
+# Конфигурация для подключения к Qdrant
+url: ${oc.env:QDRANT_URL}
+api_key: ${oc.env:QDRANT_API_KEY}
+
+# Настройки коллекции
+collection_name: legal_docs_base
+vector_size: 768
+distance: Cosine
+
+# Параметры индексации
+on_disk: false
+hnsw_config:
+  m: 16
+  ef_construct: 100
+
+# Параметры поиска
+search:
+  limit: 10
+  score_threshold: 0.5

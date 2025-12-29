@@ -6,8 +6,12 @@ dist/
 wheels/
 *.egg-info
 parse_rtf_codes.py
+queries_gen.ipynb
+prepare_retriever_dataset.py
 
 # Virtual environments
 .venv
 .python-version
 /data
+.cursor
+mlruns

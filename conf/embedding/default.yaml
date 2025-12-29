@@ -1,0 +1,15 @@
+# Конфигурация для модели эмбеддингов
+model_name: "DeepPavlov/rubert-base-cased-sentence"
+device: cuda
+batch_size: 32
+max_length: 256
+
+# Параметры нормализации
+normalize: true
+pooling: mean
+
+# Параметры чанкирования
+chunking:
+  enabled: true
+  chunk_size: 500
+  chunk_overlap: 50
