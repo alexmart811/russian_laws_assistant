@@ -63,9 +63,9 @@ class QdrantManager:
                 ),
                 hnsw_config=self.config.qdrant.hnsw_config,
             )
-            print(f"✓ Коллекция '{self.collection_name}' создана")
+            print(f"Коллекция '{self.collection_name}' создана")
         else:
-            print(f"✓ Коллекция '{self.collection_name}' уже существует")
+            print(f"Коллекция '{self.collection_name}' уже существует")
 
     def get_collection_info(self) -> dict[str, Any]:
         """Получает информацию о коллекции.
@@ -98,7 +98,7 @@ class QdrantManager:
             collection_name=self.collection_name,
             points=points,
         )
-        print(f"✓ Добавлено {len(points)} точек в коллекцию")
+        print(f"Добавлено {len(points)} точек в коллекцию")
 
     def search(
         self,
@@ -134,7 +134,7 @@ class QdrantManager:
     def delete_collection(self) -> None:
         """Удаляет коллекцию."""
         self.client.delete_collection(self.collection_name)
-        print(f"✓ Коллекция '{self.collection_name}' удалена")
+        print(f"Коллекция '{self.collection_name}' удалена")
 
     def close(self) -> None:
         """Закрывает соединение с Qdrant."""

@@ -85,7 +85,8 @@ class RetrievalDataset(Dataset):
                 candidates.extend(
                     random.sample(all_articles, self.num_negatives - len(candidates))
                 )
-        else:  # random
+        else:
+            # random
             # Случайные негативы
             candidates = [aid for aid in self.articles_df.index if aid != positive_id]
 
@@ -309,16 +310,14 @@ class RetrievalModel(pl.LightningModule):
         embedding_dim = doc_embeddings.shape[-1]
         doc_embeddings = doc_embeddings.view(
             batch_size, num_negatives + 1, embedding_dim
-        )  # [batch_size, num_docs, embedding_dim]
+        )
 
         # Вычисляем similarity scores
         scores = torch.bmm(
             query_embeddings.unsqueeze(1), doc_embeddings.transpose(1, 2)
-        ).squeeze(
-            1
-        )  # [batch_size, num_docs]
+        ).squeeze(1)
 
-        # InfoNCE Loss: позитив должен иметь максимальный score
+        # InfoNCE Loss
         labels = torch.zeros(batch_size, dtype=torch.long, device=self.device)
         loss = F.cross_entropy(scores, labels)
 
@@ -348,7 +347,6 @@ class RetrievalModel(pl.LightningModule):
             weight_decay=self.weight_decay,
         )
 
-        # Linear warmup + cosine decay
         def lr_lambda(current_step: int) -> float:
             if current_step < self.warmup_steps:
                 return float(current_step) / float(max(1, self.warmup_steps))
@@ -400,7 +398,7 @@ def evaluate_on_test(
     all_articles = list(articles_dict.values())
     all_ids = list(articles_dict.keys())
 
-    # Предвычисляем эмбеддинги всех статей (один раз)
+    # Предвычисляем эмбеддинги всех статей один раз
     print("Предвычисление эмбеддингов статей...")
     batch_size = 32
     all_article_embeddings = []
@@ -411,7 +409,6 @@ def evaluate_on_test(
             all_article_embeddings.append(batch_embeddings)
     all_article_embeddings = torch.cat(all_article_embeddings, dim=0)
 
-    # Оцениваем каждый запрос
     print("Оценка запросов...")
     with torch.no_grad():
         for _, row in eval_df.iterrows():
@@ -463,14 +460,12 @@ def train_model(
     print(f"Обучение модели: {model_name}")
     print(f"{'=' * 80}")
 
-    # Создаем MLflow логгер
     mlflow_logger = MLFlowLogger(
         experiment_name=experiment_name,
         run_name=f"train_{model_save_name}",
         tracking_uri="mlruns",
     )
 
-    # Создаем датасет и даталоадер
     train_dataset = RetrievalDataset(
         queries_df=train_df,
         articles_df=articles_df,
@@ -486,7 +481,6 @@ def train_model(
         collate_fn=collate_fn,
     )
 
-    # Создаем модель
     model = RetrievalModel(config=config, model_name=model_name)
 
     # Callback для сохранения лучшей модели
@@ -512,8 +506,8 @@ def train_model(
         callbacks=[checkpoint_callback],
         accelerator=config.embedding.device,
         devices=1,
-        precision=precision,  # Mixed precision (16-mixed) для экономии памяти
-        accumulate_grad_batches=accumulate_grad_batches,  # Накопление градиентов
+        precision=precision,
+        accumulate_grad_batches=accumulate_grad_batches,
         gradient_clip_val=1.0,
         enable_progress_bar=True,
         enable_model_summary=True,
@@ -564,7 +558,6 @@ def run_training(
     Returns:
         Словарь с путями к сохраненным моделям
     """
-    # Загружаем данные через DVC
     print("Загрузка данных через DVC...")
     project_root = Path(__file__).parent.parent
     download_script = project_root / "scripts" / "download_files.sh"
@@ -576,14 +569,12 @@ def run_training(
     )
     print("Данные загружены")
 
-    # Загружаем конфигурацию
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         cfg = compose(config_name="config")
 
     print("Конфигурация загружена")
 
-    # Загружаем данные
     print("\nЗагрузка данных...")
     train_df = pd.read_csv(train_data)
     test_df = pd.read_csv(test_data)

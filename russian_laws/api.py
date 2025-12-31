@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
@@ -13,7 +14,6 @@ from russian_laws.qdrant_manager import QdrantManager
 from russian_laws.train import RetrievalModel
 
 
-# Модели запросов и ответов
 class EmbedRequest(BaseModel):
     """Запрос на генерацию эмбеддинга."""
 
@@ -68,14 +68,12 @@ class AnswerContext(BaseModel):
     context_text: str
 
 
-# Инициализация приложения
 app = FastAPI(
     title="Russian Laws RAG Service",
     description="RAG-сервис для поиска статей российского законодательства",
     version="0.1.0",
 )
 
-# Глобальные переменные для модели и менеджеров
 model: RetrievalModel | None = None
 qdrant_manager: QdrantManager | None = None
 config: DictConfig | None = None
@@ -94,26 +92,22 @@ def load_model(checkpoint_path: str) -> RetrievalModel:
     if not checkpoint.exists():
         raise FileNotFoundError(f"Checkpoint не найден: {checkpoint_path}")
 
-    # Загружаем конфигурацию
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         cfg = compose(config_name="config")
 
-    # Загружаем checkpoint для получения гиперпараметров
     checkpoint_data = torch.load(checkpoint_path, map_location="cpu")
     hyperparams = checkpoint_data.get("hyper_parameters", {})
     model_name = hyperparams.get("model_name", cfg.embedding.model_name)
 
-    # Загружаем модель из checkpoint
     loaded_model = RetrievalModel.load_from_checkpoint(
         checkpoint_path=str(checkpoint),
         config=cfg,
         model_name=model_name,
-        strict=False,  # Разрешаем несовпадение некоторых параметров
+        strict=False,
     )
 
     loaded_model.eval()
-    # Устанавливаем модель в режим inference
     for param in loaded_model.parameters():
         param.requires_grad = False
 
@@ -125,12 +119,10 @@ async def startup_event() -> None:
     """Инициализация при запуске приложения."""
     global model, qdrant_manager, config
 
-    # Загружаем конфигурацию
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         config = compose(config_name="config")
 
-    # Путь к обученной модели
     checkpoint_path = Path("data/models/rubert_base/last.ckpt")
     if not checkpoint_path.exists():
         raise FileNotFoundError(
@@ -141,7 +133,6 @@ async def startup_event() -> None:
     print(f"Загрузка модели из {checkpoint_path}...")
     try:
         model = load_model(str(checkpoint_path))
-        # Перемещаем модель на нужное устройство
         device = config.embedding.device
         if device == "cuda" and torch.cuda.is_available():
             model = model.to("cuda")
@@ -152,7 +143,6 @@ async def startup_event() -> None:
         print(f"✗ Ошибка загрузки модели: {e}")
         raise
 
-    # Инициализация Qdrant
     print("Инициализация Qdrant...")
     qdrant_manager = QdrantManager(config)
     print("✓ Qdrant инициализирован")
@@ -226,19 +216,16 @@ async def search(request: SearchRequest) -> SearchResponse:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        # Генерируем эмбеддинг запроса
         with torch.no_grad():
             query_embedding = model.encode([request.query])[0]
             query_vector = query_embedding.cpu().numpy().tolist()
 
-        # Ищем в Qdrant
         results = qdrant_manager.search(
             query_vector=query_vector,
             limit=request.limit,
             score_threshold=request.score_threshold,
         )
 
-        # Форматируем результаты
         search_results = []
         for point in results:
             payload = point.payload or {}
@@ -274,7 +261,6 @@ async def answer(request: AnswerRequest) -> AnswerContext:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        # Ищем релевантные статьи
         search_response = await search(
             SearchRequest(
                 query=request.query,
@@ -283,7 +269,6 @@ async def answer(request: AnswerRequest) -> AnswerContext:
             )
         )
 
-        # Формируем контекст для LLM
         relevant_articles = []
         context_parts = []
 
@@ -297,7 +282,6 @@ async def answer(request: AnswerRequest) -> AnswerContext:
             }
             relevant_articles.append(article_data)
 
-            # Формируем текстовый контекст
             context_parts.append(
                 f"Статья {result.article_id} ({result.codex}):\n"
                 f"Название: {result.article_title}\n"
@@ -319,6 +303,4 @@ async def answer(request: AnswerRequest) -> AnswerContext:
 
 
 if __name__ == "__main__":
-    import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)

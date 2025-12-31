@@ -251,7 +251,7 @@ class RetrievalTester(pl.LightningModule):
         Returns:
             Словарь с результатами
         """
-        query_text = batch["query_text"][0]  # Батч размера 1
+        query_text = batch["query_text"][0]
         relevant_id = int(batch["article_id"][0])
 
         # Генерируем эмбеддинг для запроса

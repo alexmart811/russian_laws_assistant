@@ -131,7 +131,6 @@ class EmbeddingModel:
             embeddings = self.encode(batch)
             all_embeddings.append(embeddings.cpu())
 
-        # Конкатенируем все батчи
         all_embeddings = torch.cat(all_embeddings, dim=0)
 
         return all_embeddings.tolist()

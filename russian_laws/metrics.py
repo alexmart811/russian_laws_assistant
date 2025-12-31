@@ -77,7 +77,6 @@ def ndcg_at_k(relevant_ids: list[int], retrieved_ids: list[int], k: int) -> floa
 
     relevant_set = set(relevant_ids)
 
-    # DCG - реальное cumulative gain
     dcg = 0.0
     for i, doc_id in enumerate(retrieved_ids[:k], start=1):
         if doc_id in relevant_set:
@@ -86,7 +85,6 @@ def ndcg_at_k(relevant_ids: list[int], retrieved_ids: list[int], k: int) -> floa
             # Дисконтирование по логарифмической шкале
             dcg += relevance / np.log2(i + 1)
 
-    # IDCG - идеальное cumulative gain (все релевантные документы на первых позициях)
     idcg = 0.0
     for i in range(1, min(len(relevant_ids), k) + 1):
         idcg += 1.0 / np.log2(i + 1)
