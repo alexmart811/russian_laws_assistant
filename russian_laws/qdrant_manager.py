@@ -22,8 +22,7 @@ class QdrantManager:
 
         # Создаем клиента
         self.client = QdrantClient(
-            url=config.qdrant.url,
-            api_key=config.qdrant.api_key,
+            url=config.qdrant.url, api_key=config.qdrant.api_key, timeout=120
         )
 
         # Маппинг типов расстояний
@@ -76,8 +75,8 @@ class QdrantManager:
         try:
             info = self.client.get_collection(self.collection_name)
             return {
-                "name": info.config.params.vectors.size,
-                "vectors_count": info.vectors_count,
+                "name": self.collection_name,
+                "vector_size": info.config.params.vectors.size,
                 "points_count": info.points_count,
                 "status": info.status,
             }

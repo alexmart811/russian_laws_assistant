@@ -3,15 +3,14 @@
 from pathlib import Path
 from typing import Any
 
-import torch
-import uvicorn
 from fastapi import FastAPI, HTTPException
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 from pydantic import BaseModel
 
+from russian_laws.embeddings import EmbeddingModel
+from russian_laws.generator import LLMGenerator
 from russian_laws.qdrant_manager import QdrantManager
-from russian_laws.train import RetrievalModel
 
 
 class EmbedRequest(BaseModel):
@@ -68,77 +67,48 @@ class AnswerContext(BaseModel):
     context_text: str
 
 
+class GenerateRequest(BaseModel):
+    """Запрос на генерацию ответа."""
+
+    query: str
+    limit: int = 5
+    score_threshold: float | None = None
+
+
+class GenerateResponse(BaseModel):
+    """Ответ с сгенерированным текстом."""
+
+    query: str
+    answer: str
+    sources: list[dict[str, Any]]
+
+
 app = FastAPI(
     title="Russian Laws RAG Service",
     description="RAG-сервис для поиска статей российского законодательства",
     version="0.1.0",
 )
 
-model: RetrievalModel | None = None
+# Глобальные переменные для модели и менеджеров
+embedding_model: EmbeddingModel | None = None
 qdrant_manager: QdrantManager | None = None
+llm_generator: LLMGenerator | None = None
 config: DictConfig | None = None
-
-
-def load_model(checkpoint_path: str) -> RetrievalModel:
-    """Загружает обученную модель из checkpoint.
-
-    Args:
-        checkpoint_path: Путь к checkpoint файлу
-
-    Returns:
-        Загруженная модель
-    """
-    checkpoint = Path(checkpoint_path)
-    if not checkpoint.exists():
-        raise FileNotFoundError(f"Checkpoint не найден: {checkpoint_path}")
-
-    config_dir = Path("conf").absolute()
-    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        cfg = compose(config_name="config")
-
-    checkpoint_data = torch.load(checkpoint_path, map_location="cpu")
-    hyperparams = checkpoint_data.get("hyper_parameters", {})
-    model_name = hyperparams.get("model_name", cfg.embedding.model_name)
-
-    loaded_model = RetrievalModel.load_from_checkpoint(
-        checkpoint_path=str(checkpoint),
-        config=cfg,
-        model_name=model_name,
-        strict=False,
-    )
-
-    loaded_model.eval()
-    for param in loaded_model.parameters():
-        param.requires_grad = False
-
-    return loaded_model
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
     """Инициализация при запуске приложения."""
-    global model, qdrant_manager, config
+    global embedding_model, qdrant_manager, llm_generator, config
 
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         config = compose(config_name="config")
 
-    checkpoint_path = Path("data/models/rubert_base/last.ckpt")
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Модель не найдена: {checkpoint_path}. "
-            "Убедитесь, что обучение завершено и модель сохранена."
-        )
-
-    print(f"Загрузка модели из {checkpoint_path}...")
+    print(f"Загрузка модели эмбеддингов: {config.embedding.model_name}...")
     try:
-        model = load_model(str(checkpoint_path))
-        device = config.embedding.device
-        if device == "cuda" and torch.cuda.is_available():
-            model = model.to("cuda")
-        else:
-            model = model.to("cpu")
-        print("✓ Модель загружена")
+        embedding_model = EmbeddingModel(config)
+        print("✓ Модель эмбеддингов загружена")
     except Exception as e:
         print(f"✗ Ошибка загрузки модели: {e}")
         raise
@@ -146,6 +116,14 @@ async def startup_event() -> None:
     print("Инициализация Qdrant...")
     qdrant_manager = QdrantManager(config)
     print("✓ Qdrant инициализирован")
+
+    print(f"Инициализация LLM генератора: {config.generator.model}...")
+    try:
+        llm_generator = LLMGenerator(config)
+        print("LLM генератор инициализирован")
+    except Exception as e:
+        print(f"Ошибка инициализации генератора: {e}")
+        raise
 
 
 @app.on_event("shutdown")
@@ -162,35 +140,27 @@ async def root() -> dict[str, str]:
     return {
         "service": "Russian Laws RAG Service",
         "status": "running",
-        "endpoints": ["/embed", "/search", "/answer"],
+        "endpoints": ["/embed", "/search", "/answer", "/generate"],
     }
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Проверка здоровья сервиса."""
-    if model is None or qdrant_manager is None:
+    if embedding_model is None or qdrant_manager is None:
         raise HTTPException(status_code=503, detail="Service not ready")
-    return {"status": "healthy", "model_loaded": model is not None}
+    return {"status": "healthy", "model_loaded": embedding_model is not None}
 
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(request: EmbedRequest) -> EmbedResponse:
-    """Генерирует эмбеддинг для текста.
-
-    Args:
-        request: Запрос с текстом
-
-    Returns:
-        Эмбеддинг текста
-    """
-    if model is None:
+    """Генерирует эмбеддинг для текста."""
+    if embedding_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        with torch.no_grad():
-            embedding = model.encode([request.text])[0]
-            embedding_list = embedding.cpu().numpy().tolist()
+        embedding = embedding_model.encode([request.text])[0]
+        embedding_list = embedding.cpu().tolist()
 
         return EmbedResponse(
             embedding=embedding_list,
@@ -204,40 +174,43 @@ async def embed(request: EmbedRequest) -> EmbedResponse:
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest) -> SearchResponse:
-    """Ищет релевантные фрагменты по запросу.
-
-    Args:
-        request: Запрос с текстом и параметрами поиска
-
-    Returns:
-        Список релевантных статей с метаданными
-    """
-    if model is None or qdrant_manager is None:
+    """Ищет релевантные фрагменты по запросу."""
+    if embedding_model is None or qdrant_manager is None:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        with torch.no_grad():
-            query_embedding = model.encode([request.query])[0]
-            query_vector = query_embedding.cpu().numpy().tolist()
+        query_embedding = embedding_model.encode([request.query])[0]
+        query_vector = query_embedding.cpu().tolist()
 
         results = qdrant_manager.search(
             query_vector=query_vector,
-            limit=request.limit,
+            limit=request.limit * 3,
             score_threshold=request.score_threshold,
         )
 
-        search_results = []
+        seen_article_ids: set[int] = set()
+        search_results: list[SearchResult] = []
+
         for point in results:
             payload = point.payload or {}
+            article_id = payload.get("article_id")
+
+            if article_id is None or article_id in seen_article_ids:
+                continue
+
+            seen_article_ids.add(article_id)
             search_results.append(
                 SearchResult(
-                    article_id=point.id,
+                    article_id=article_id,
                     article_title=payload.get("article_title", ""),
                     article_text=payload.get("article_text", ""),
                     codex=payload.get("codex", ""),
                     score=float(point.score) if hasattr(point, "score") else 0.0,
                 )
             )
+
+            if len(search_results) >= request.limit:
+                break
 
         return SearchResponse(
             results=search_results,
@@ -249,15 +222,8 @@ async def search(request: SearchRequest) -> SearchResponse:
 
 @app.post("/answer", response_model=AnswerContext)
 async def answer(request: AnswerRequest) -> AnswerContext:
-    """Подготавливает контекст для LLM на основе релевантных статей.
-
-    Args:
-        request: Запрос с текстом вопроса
-
-    Returns:
-        Контекст с релевантными статьями для LLM
-    """
-    if model is None or qdrant_manager is None:
+    """Подготавливает контекст для LLM на основе релевантных статей."""
+    if embedding_model is None or qdrant_manager is None:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
@@ -302,5 +268,38 @@ async def answer(request: AnswerRequest) -> AnswerContext:
         )
 
 
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(request: GenerateRequest) -> GenerateResponse:
+    """Генерирует ответ на вопрос пользователя на основе релевантных статей."""
+    if embedding_model is None or qdrant_manager is None or llm_generator is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    try:
+        answer_context = await answer(
+            AnswerRequest(
+                query=request.query,
+                limit=request.limit,
+                score_threshold=request.score_threshold,
+            )
+        )
+
+        generated_answer = llm_generator.generate(
+            query=request.query,
+            context=answer_context.context_text,
+        )
+
+        return GenerateResponse(
+            query=request.query,
+            answer=generated_answer,
+            sources=answer_context.relevant_articles,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error generating answer: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
+    import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

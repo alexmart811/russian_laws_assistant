@@ -3,6 +3,7 @@ defaults:
   - qdrant: default
   - embedding: default
   - train: default
+  - generator: default
   - _self_
 
 # Общие настройки проекта

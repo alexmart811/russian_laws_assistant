@@ -1,6 +1,6 @@
 # Конфигурация для модели эмбеддингов
-model_name: "DeepPavlov/rubert-base-cased-sentence"
-device: cuda
+model_name: "intfloat/multilingual-e5-large"
+device: cpu
 batch_size: 32
 max_length: 256
 

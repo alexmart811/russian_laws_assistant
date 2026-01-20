@@ -1,6 +1,5 @@
 """Модуль для тестирования retrieval модели с использованием PyTorch Lightning."""
 
-import subprocess
 from pathlib import Path
 
 import fire
@@ -9,51 +8,12 @@ import pytorch_lightning as pl
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.loggers import MLFlowLogger
-from qdrant_client.models import PointStruct
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 
 from russian_laws.embeddings import EmbeddingModel
+from russian_laws.indexer import ArticleIndexer
 from russian_laws.metrics import RetrievalMetrics
 from russian_laws.qdrant_manager import QdrantManager
-
-
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Разбивает текст на чанки с перекрытием.
-
-    Args:
-        text: Текст для разбиения
-        chunk_size: Размер чанка в словах
-        chunk_overlap: Перекрытие между чанками в словах
-
-    Returns:
-        Список текстовых чанков
-    """
-    if not text or not text.strip():
-        return []
-
-    words = text.split()
-    if len(words) <= chunk_size:
-        return [text]
-
-    chunks = []
-    start = 0
-
-    while start < len(words):
-        end = start + chunk_size
-        chunk_words = words[start:end]
-        chunk_text_str = " ".join(chunk_words)
-        if chunk_text_str.strip():
-            chunks.append(chunk_text_str)
-
-        # Переход к следующему чанку с перекрытием
-        start += chunk_size - chunk_overlap
-
-        # Если осталось меньше слов, чем размер перекрытия, останавливаемся
-        if start >= len(words):
-            break
-
-    return chunks if chunks else [text]
 
 
 class QueryDataset(Dataset):
@@ -155,91 +115,12 @@ class RetrievalTester(pl.LightningModule):
             articles_df: DataFrame со статьями
             batch_size: Размер батча для индексации
         """
-        # Проверяем, включено ли чанкирование
-        chunking_enabled = self.config.embedding.chunking.enabled
-        chunk_size = self.config.embedding.chunking.chunk_size
-        chunk_overlap = self.config.embedding.chunking.chunk_overlap
-
-        print(f"\nИндексация {len(articles_df)} статей в Qdrant...")
-        if chunking_enabled:
-            print(
-                f"Чанкирование: включено (размер={chunk_size}, перекрытие={chunk_overlap})"
-            )
-        else:
-            print("Чанкирование: отключено")
-
-        # Создаем коллекцию (пересоздаем, если существует)
-        self.qdrant_manager.create_collection(recreate=True)
-
-        # Индексируем статьи батчами
-        points = []
-        point_id = 0
-        total_chunks = 0
-
-        for _, row in tqdm(
-            articles_df.iterrows(), total=len(articles_df), desc="Индексация"
-        ):
-            # Создаем текст для индексации (название + текст статьи)
-            text = f"{row['article_title']} {row['article_text']}"
-
-            if chunking_enabled:
-                # Разбиваем на чанки
-                chunks = chunk_text(text, chunk_size, chunk_overlap)
-                total_chunks += len(chunks)
-
-                # Создаем точку для каждого чанка
-                for chunk_idx, chunk in enumerate(chunks):
-                    embedding = self.embedding_model.encode([chunk])[0].tolist()
-
-                    point = PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload={
-                            "article_id": int(row["article_id"]),
-                            "chunk_idx": chunk_idx,
-                            "total_chunks": len(chunks),
-                            "article_num": str(row["article_num"]),
-                            "article_title": row["article_title"],
-                            "codex": row["codex"],
-                        },
-                    )
-                    points.append(point)
-                    point_id += 1
-
-                    # Сохраняем батчами
-                    if len(points) >= batch_size:
-                        self.qdrant_manager.upsert_points(points)
-                        points = []
-            else:
-                embedding = self.embedding_model.encode([text])[0].tolist()
-
-                point = PointStruct(
-                    id=int(row["article_id"]),
-                    vector=embedding,
-                    payload={
-                        "article_id": int(row["article_id"]),
-                        "article_num": str(row["article_num"]),
-                        "article_title": row["article_title"],
-                        "codex": row["codex"],
-                    },
-                )
-                points.append(point)
-
-                # Сохраняем батчами
-                if len(points) >= batch_size:
-                    self.qdrant_manager.upsert_points(points)
-                    points = []
-
-        # Сохраняем оставшиеся точки
-        if points:
-            self.qdrant_manager.upsert_points(points)
-
-        if chunking_enabled:
-            print(
-                f"✓ Индексация завершена. Создано {total_chunks} чанков из {len(articles_df)} статей"
-            )
-        else:
-            print(f"✓ Индексация завершена. Проиндексировано {len(articles_df)} статей")
+        indexer = ArticleIndexer(
+            embedding_model=self.embedding_model,
+            qdrant_manager=self.qdrant_manager,
+            config=self.config,
+        )
+        indexer.index_articles(articles_df, batch_size=batch_size)
 
     def test_step(self, batch: dict, batch_idx: int) -> dict:
         """Один шаг тестирования.
@@ -320,16 +201,16 @@ def run_test(
     Returns:
         Словарь с метриками
     """
-    print("Загрузка данных через DVC...")
-    project_root = Path(__file__).parent.parent
-    download_script = project_root / "scripts" / "download_files.sh"
+    # print("Загрузка данных через DVC...")
+    # project_root = Path(__file__).parent.parent
+    # download_script = project_root / "scripts" / "download_files.sh"
 
-    subprocess.run(
-        ["bash", str(download_script)],
-        cwd=str(project_root),
-        check=True,
-    )
-    print("Данные загружены")
+    # subprocess.run(
+    #     ["bash", str(download_script)],
+    #     cwd=str(project_root),
+    #     check=True,
+    # )
+    # print("Данные загружены")
 
     # Загружаем конфигурацию
     config_dir = Path("conf").absolute()
