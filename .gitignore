@@ -1,16 +1,41 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-scripts/experiments.ipynb
-russian_laws/train.py
+# Environment variables
+.env
+.env.local
+.env.*.local
 
-# Virtual environments
-.venv
-.python-version
-/data
-.cursor
-mlruns
+# Backend
+backend/.venv
+backend/__pycache__/
+backend/*.py[oc]
+backend/build/
+backend/dist/
+backend/.cursor
+backend/mlruns
+backend/data/
+backend/.env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env
+frontend/.env.local
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.bak
+*.tmp
