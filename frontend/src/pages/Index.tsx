@@ -56,7 +56,7 @@ const Index = () => {
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
       console.error("Error generating answer:", error);
-      
+
       toast({
         title: "Ошибка",
         description: "Не удалось получить ответ от сервера. Проверьте подключение к API.",

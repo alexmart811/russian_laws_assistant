@@ -52,7 +52,7 @@ export const ChatMessage = ({ role, content, timestamp, sources }: ChatMessagePr
             {content}
           </p>
         </div>
-        
+
         {sources && sources.length > 0 && (
           <div className="mt-3 space-y-2">
             <p className="text-xs font-medium text-muted-foreground flex items-center gap-1">
@@ -75,7 +75,7 @@ export const ChatMessage = ({ role, content, timestamp, sources }: ChatMessagePr
             ))}
           </div>
         )}
-        
+
         {timestamp && (
           <p className="text-xs text-muted-foreground mt-2">{timestamp}</p>
         )}
