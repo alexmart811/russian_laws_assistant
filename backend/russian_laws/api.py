@@ -12,8 +12,8 @@ from pydantic import BaseModel
 from russian_laws.embeddings import EmbeddingModel
 from russian_laws.generator import LLMGenerator
 from russian_laws.qdrant_manager import QdrantManager
+from russian_laws.sparse_encoder import SparseEncoder
 
-# Загрузка переменных окружения из .env файла
 load_dotenv()
 
 
@@ -104,6 +104,7 @@ app.add_middleware(
 
 # Глобальные переменные для модели и менеджеров
 embedding_model: EmbeddingModel | None = None
+sparse_encoder: SparseEncoder | None = None
 qdrant_manager: QdrantManager | None = None
 llm_generator: LLMGenerator | None = None
 config: DictConfig | None = None
@@ -112,7 +113,7 @@ config: DictConfig | None = None
 @app.on_event("startup")
 async def startup_event() -> None:
     """Инициализация при запуске приложения."""
-    global embedding_model, qdrant_manager, llm_generator, config
+    global embedding_model, sparse_encoder, qdrant_manager, llm_generator, config
 
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
@@ -125,6 +126,17 @@ async def startup_event() -> None:
     except Exception as e:
         print(f"✗ Ошибка загрузки модели: {e}")
         raise
+
+    # Инициализируем sparse encoder если включен гибридный режим
+    hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+    if hybrid_enabled:
+        print("Инициализация sparse encoder...")
+        try:
+            sparse_encoder = SparseEncoder(config)
+            print("✓ Sparse encoder инициализирован")
+        except Exception as e:
+            print(f"✗ Ошибка инициализации sparse encoder: {e}")
+            raise
 
     print("Инициализация Qdrant...")
     qdrant_manager = QdrantManager(config)
@@ -187,7 +199,7 @@ async def embed(request: EmbedRequest) -> EmbedResponse:
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest) -> SearchResponse:
-    """Ищет релевантные фрагменты по запросу."""
+    """Ищет релевантные фрагменты по запросу (гибридный поиск)."""
     if embedding_model is None or qdrant_manager is None:
         raise HTTPException(status_code=503, detail="Service not ready")
 
@@ -195,11 +207,23 @@ async def search(request: SearchRequest) -> SearchResponse:
         query_embedding = embedding_model.encode([request.query])[0]
         query_vector = query_embedding.cpu().tolist()
 
-        results = qdrant_manager.search(
-            query_vector=query_vector,
-            limit=request.limit * 3,
-            score_threshold=request.score_threshold,
-        )
+        # Гибридный поиск если включен
+        hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+        if hybrid_enabled and sparse_encoder is not None:
+            sparse_query = sparse_encoder.encode(request.query)
+            results = qdrant_manager.hybrid_search(
+                dense_vector=query_vector,
+                sparse_vector=sparse_query,
+                limit=request.limit * 3,
+                score_threshold=request.score_threshold,
+            )
+        else:
+            # Fallback на обычный dense поиск
+            results = qdrant_manager.search(
+                query_vector=query_vector,
+                limit=request.limit * 3,
+                score_threshold=request.score_threshold,
+            )
 
         seen_article_ids: set[int] = set()
         search_results: list[SearchResult] = []

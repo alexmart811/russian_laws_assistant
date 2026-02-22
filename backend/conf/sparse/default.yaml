@@ -1,0 +1,9 @@
+# Конфигурация для sparse encoding (BM25)
+
+# Параметры токенизации
+language: russian
+use_stemming: false
+min_token_length: 2
+
+# Параметры словаря
+vocabulary_path: null # Путь к сохраненному словарю (опционально)

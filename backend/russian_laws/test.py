@@ -12,6 +12,7 @@ from russian_laws.embeddings import EmbeddingModel
 from russian_laws.indexer import ArticleIndexer
 from russian_laws.metrics import RetrievalMetrics
 from russian_laws.qdrant_manager import QdrantManager
+from russian_laws.sparse_encoder import SparseEncoder
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -79,8 +80,10 @@ class RetrievalTester(pl.LightningModule):
 
         # Инициализация компонентов
         self.embedding_model = None
+        self.sparse_encoder = None
         self.qdrant_manager = None
         self.metrics = RetrievalMetrics(k_values=self.k_values)
+        self.hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
 
     def setup(self, stage: str | None = None) -> None:
         """Настройка компонентов перед тестированием.
@@ -102,6 +105,12 @@ class RetrievalTester(pl.LightningModule):
             vector_size = self.embedding_model.get_embedding_dim()
             self.config.qdrant.vector_size = vector_size
 
+            # Инициализируем sparse encoder если включен гибридный режим
+            if self.hybrid_enabled:
+                print("Инициализация sparse encoder...")
+                self.sparse_encoder = SparseEncoder(self.config)
+                print("✓ Sparse encoder инициализирован")
+
             # Инициализация Qdrant менеджера
             self.qdrant_manager = QdrantManager(self.config)
 
@@ -118,6 +127,7 @@ class RetrievalTester(pl.LightningModule):
             embedding_model=self.embedding_model,
             qdrant_manager=self.qdrant_manager,
             config=self.config,
+            sparse_encoder=self.sparse_encoder,
         )
         indexer.index_articles(articles_df, batch_size=batch_size)
 
@@ -137,11 +147,20 @@ class RetrievalTester(pl.LightningModule):
         # Генерируем эмбеддинг для запроса
         query_embedding = self.embedding_model.encode([query_text])[0].tolist()
 
-        # Ищем в Qdrant
+        # Ищем в Qdrant (гибридный поиск если включен)
         max_k = max(self.k_values)
-        results = self.qdrant_manager.search(
-            query_vector=query_embedding, limit=max_k, score_threshold=0.0
-        )
+        if self.hybrid_enabled and self.sparse_encoder is not None:
+            sparse_query = self.sparse_encoder.encode(query_text)
+            results = self.qdrant_manager.hybrid_search(
+                dense_vector=query_embedding,
+                sparse_vector=sparse_query,
+                limit=max_k,
+                score_threshold=0.0,
+            )
+        else:
+            results = self.qdrant_manager.search(
+                query_vector=query_embedding, limit=max_k, score_threshold=0.0
+            )
 
         # Извлекаем ID найденных статей (убираем дубликаты, сохраняя порядок)
         retrieved_ids = []

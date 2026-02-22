@@ -1,6 +1,6 @@
 # Конфигурация генератора
 provider: openai
-model: openai/gpt-4.1
+model: qwen/qwen3-vl-8b-instruct
 api_key: ${oc.env:API_KEY_ROUTER}
 base_url: https://api.vsellm.ru/v1
 

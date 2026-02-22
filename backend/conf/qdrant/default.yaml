@@ -3,9 +3,15 @@ url: ${oc.env:QDRANT_URL}
 api_key: ${oc.env:QDRANT_API_KEY}
 
 # Настройки коллекции
-collection_name: legal_docs_base
+collection_name: legal_docs_hybrid
 vector_size: 768
 distance: Cosine
+
+# Гибридный поиск
+hybrid:
+  enabled: true
+  alpha: 0.9 # Вес комбинирования (0.5 = баланс dense/sparse)
+  sparse_modifier: idf # BM25-подобное взвешивание
 
 # Параметры индексации
 on_disk: false

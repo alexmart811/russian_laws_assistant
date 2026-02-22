@@ -5,6 +5,7 @@ from omegaconf import DictConfig
 from qdrant_client.models import PointStruct
 from russian_laws.embeddings import EmbeddingModel
 from russian_laws.qdrant_manager import QdrantManager
+from russian_laws.sparse_encoder import SparseEncoder
 from tqdm import tqdm
 
 
@@ -16,6 +17,7 @@ class ArticleIndexer:
         embedding_model: EmbeddingModel,
         qdrant_manager: QdrantManager,
         config: DictConfig,
+        sparse_encoder: SparseEncoder | None = None,
     ):
         """Инициализация индексатора.
 
@@ -23,10 +25,13 @@ class ArticleIndexer:
             embedding_model: Модель для генерации эмбеддингов
             qdrant_manager: Менеджер для работы с Qdrant
             config: Конфигурация с параметрами чанкирования
+            sparse_encoder: Опциональный sparse encoder для гибридного поиска
         """
         self.embedding_model = embedding_model
         self.qdrant_manager = qdrant_manager
         self.config = config
+        self.sparse_encoder = sparse_encoder
+        self.hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
 
     @staticmethod
     def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -114,9 +119,22 @@ class ArticleIndexer:
                 for chunk_idx, chunk in enumerate(chunks):
                     embedding = self.embedding_model.encode([chunk])[0].tolist()
 
+                    # Генерируем sparse вектор если гибридный режим включен
+                    if self.hybrid_enabled and self.sparse_encoder:
+                        sparse_vec = self.sparse_encoder.encode(chunk)
+                        vector_data = {
+                            "dense": embedding,
+                            "sparse": {
+                                "indices": [idx for idx, _ in sparse_vec],
+                                "values": [val for _, val in sparse_vec],
+                            },
+                        }
+                    else:
+                        vector_data = embedding
+
                     point = PointStruct(
                         id=point_id,
-                        vector=embedding,
+                        vector=vector_data,
                         payload={
                             "article_id": int(row["article_id"]),
                             "chunk_idx": chunk_idx,
@@ -137,9 +155,22 @@ class ArticleIndexer:
             else:
                 embedding = self.embedding_model.encode([text])[0].tolist()
 
+                # Генерируем sparse вектор если гибридный режим включен
+                if self.hybrid_enabled and self.sparse_encoder:
+                    sparse_vec = self.sparse_encoder.encode(text)
+                    vector_data = {
+                        "dense": embedding,
+                        "sparse": {
+                            "indices": [idx for idx, _ in sparse_vec],
+                            "values": [val for _, val in sparse_vec],
+                        },
+                    }
+                else:
+                    vector_data = embedding
+
                 point = PointStruct(
                     id=int(row["article_id"]),
-                    vector=embedding,
+                    vector=vector_data,
                     payload={
                         "article_id": int(row["article_id"]),
                         "article_num": str(row["article_num"]),
