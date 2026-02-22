@@ -264,32 +264,62 @@ async def answer(request: AnswerRequest) -> AnswerContext:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        search_response = await search(
-            SearchRequest(
-                query=request.query,
+        # Выполняем прямой поиск для получения parent_text
+        query_embedding = embedding_model.encode([request.query])[0]
+        query_vector = query_embedding.cpu().tolist()
+
+        # Гибридный поиск если включен
+        hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+        if hybrid_enabled and sparse_encoder is not None:
+            sparse_query = sparse_encoder.encode(request.query)
+            results = qdrant_manager.hybrid_search(
+                dense_vector=query_vector,
+                sparse_vector=sparse_query,
                 limit=request.limit,
                 score_threshold=request.score_threshold,
             )
-        )
+        else:
+            results = qdrant_manager.search(
+                query_vector=query_vector,
+                limit=request.limit,
+                score_threshold=request.score_threshold,
+            )
 
         relevant_articles = []
         context_parts = []
+        seen_parent_ids: set[str] = set()
 
-        for result in search_response.results:
+        for point in results:
+            payload = point.payload or {}
+
+            # Для parent-child используем parent_text, иначе article_text
+            parent_id = payload.get("parent_id")
+            if parent_id and parent_id in seen_parent_ids:
+                # Пропускаем дубликаты parent'ов
+                continue
+
+            if parent_id:
+                seen_parent_ids.add(parent_id)
+
+            # Извлекаем текст для контекста (parent_text если есть, иначе article_text)
+            context_text_chunk = payload.get("parent_text") or payload.get(
+                "article_text", ""
+            )
+
             article_data = {
-                "article_id": result.article_id,
-                "article_title": result.article_title,
-                "article_text": result.article_text,
-                "codex": result.codex,
-                "score": result.score,
+                "article_id": payload.get("article_id"),
+                "article_title": payload.get("article_title", ""),
+                "article_text": context_text_chunk,
+                "codex": payload.get("codex", ""),
+                "score": float(point.score) if hasattr(point, "score") else 0.0,
             }
             relevant_articles.append(article_data)
 
             context_parts.append(
-                f"Статья {result.article_id} ({result.codex}):\n"
-                f"Название: {result.article_title}\n"
-                f"Текст: {result.article_text}\n"
-                f"Релевантность: {result.score:.4f}\n"
+                f"Статья {payload.get('article_id')} ({payload.get('codex', 'N/A')}):\n"
+                f"Название: {payload.get('article_title', '')}\n"
+                f"Текст: {context_text_chunk}\n"
+                f"Релевантность: {point.score:.4f}\n"
             )
 
         context_text = "\n---\n".join(context_parts)

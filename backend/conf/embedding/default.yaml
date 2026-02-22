@@ -11,5 +11,17 @@ pooling: mean
 # Параметры чанкирования
 chunking:
   enabled: true
+  strategy: parent_child # "fixed" или "parent_child"
+
+  # Фиксированное чанкирование (старый способ)
   chunk_size: 500
   chunk_overlap: 50
+
+  # Parent-Child чанкирование (новый способ)
+  child:
+    min_size: 30 # Минимум слов в child чанке
+    max_size: 150 # Максимум слов в child чанке
+  parent:
+    children_per_parent: 3 # Сколько child объединяются в parent
+    max_size: 500 # Максимум слов в parent чанке
+    overlap: false # Перекрытие между parent чанками
