@@ -7,10 +7,13 @@ import pandas as pd
 import pytorch_lightning as pl
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
+from openai import OpenAI
 from pytorch_lightning.loggers import MLFlowLogger
+from ragas.llms import llm_factory
 from russian_laws.embeddings import EmbeddingModel
+from russian_laws.generator import LLMGenerator
 from russian_laws.indexer import ArticleIndexer
-from russian_laws.metrics import RetrievalMetrics
+from russian_laws.metrics import RAGASMetrics, RetrievalMetrics
 from russian_laws.qdrant_manager import QdrantManager
 from russian_laws.sparse_encoder import SparseEncoder
 from torch.utils.data import DataLoader, Dataset
@@ -82,8 +85,11 @@ class RetrievalTester(pl.LightningModule):
         self.embedding_model = None
         self.sparse_encoder = None
         self.qdrant_manager = None
+        self.llm_generator = None
         self.metrics = RetrievalMetrics(k_values=self.k_values)
+        self.ragas_metrics = None
         self.hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+        self.ragas_enabled = config.ragas.get("enabled", False)
 
     def setup(self, stage: str | None = None) -> None:
         """Настройка компонентов перед тестированием.
@@ -113,6 +119,33 @@ class RetrievalTester(pl.LightningModule):
 
             # Инициализация Qdrant менеджера
             self.qdrant_manager = QdrantManager(self.config)
+
+            # Инициализируем LLM генератор для RAGAS
+            if self.ragas_enabled:
+                print("\nИнициализация LLM для генерации ответов...")
+                self.llm_generator = LLMGenerator(self.config)
+                print("✓ LLM генератор инициализирован")
+
+                # Инициализируем RAGAS метрики
+                print("\nИнициализация RAGAS метрик...")
+
+                # LLM для RAGAS judge через llm_factory (GPT-4o-mini)
+                openai_client = OpenAI(
+                    api_key=self.config.ragas.llm.api_key,
+                    base_url=self.config.ragas.llm.base_url,
+                )
+
+                ragas_llm = llm_factory(
+                    model=self.config.ragas.llm.model,
+                    client=openai_client,
+                    max_tokens=self.config.ragas.llm.get("max_tokens", 4096),
+                    temperature=self.config.ragas.llm.get("temperature", 0.0),
+                )
+
+                self.ragas_metrics = RAGASMetrics(llm=ragas_llm)
+                print(
+                    f"✓ RAGAS метрики инициализированы (модель: {self.config.ragas.llm.model})"
+                )
 
             print("Компоненты инициализированы")
 
@@ -174,6 +207,31 @@ class RetrievalTester(pl.LightningModule):
         # Обновляем метрики
         self.metrics.update(relevant_ids=[relevant_id], retrieved_ids=retrieved_ids)
 
+        # Генерация ответа и обновление RAGAS метрик
+        if self.ragas_enabled and self.llm_generator and self.ragas_metrics:
+            # Извлекаем контексты из результатов поиска
+            contexts = []
+            for point in results:
+                # Используем parent_text если есть, иначе article_text
+                context = point.payload.get("parent_text") or point.payload.get(
+                    "article_text", ""
+                )
+                if context:
+                    contexts.append(context)
+
+            # Генерируем ответ
+            if contexts:
+                try:
+                    # Объединяем контексты в один текст
+                    context_text = "\n\n".join(contexts)
+                    answer = self.llm_generator.generate(query_text, context_text)
+                    # Обновляем RAGAS метрики
+                    self.ragas_metrics.update(
+                        question=query_text, answer=answer, contexts=contexts
+                    )
+                except Exception as e:
+                    print(f"Ошибка генерации ответа для RAGAS: {e}")
+
         return {
             "query_text": query_text,
             "relevant_id": relevant_id,
@@ -182,8 +240,16 @@ class RetrievalTester(pl.LightningModule):
 
     def on_test_epoch_end(self) -> None:
         """Вызывается в конце тестовой эпохи."""
-        # Вычисляем финальные метрики
+        # Вычисляем retrieval метрики
         metrics = self.metrics.compute()
+
+        # Вычисляем RAGAS метрики
+        if self.ragas_enabled and self.ragas_metrics:
+            print("\n" + "=" * 80)
+            print("ВЫЧИСЛЕНИЕ RAGAS МЕТРИК")
+            print("=" * 80)
+            ragas_results = self.ragas_metrics.compute()
+            metrics.update(ragas_results)
 
         # Логируем метрики
         for metric_name, value in metrics.items():

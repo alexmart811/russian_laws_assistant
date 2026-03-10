@@ -5,7 +5,7 @@ api_key: ${oc.env:API_KEY_ROUTER}
 base_url: https://api.vsellm.ru/v1
 
 # Параметры генерации
-max_tokens: 512
+max_tokens: 4096
 temperature: 0.7
 
 # Системный промпт для юридического помощника

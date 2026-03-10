@@ -1,0 +1,19 @@
+# Конфигурация для RAGAS метрик
+
+# Включение RAGAS метрик
+enabled: true
+
+# Какие метрики вычислять (без ground truth)
+metrics:
+  faithfulness: true # Соответствие ответа контексту
+  answer_relevancy: false # Требует embeddings (отключена)
+  context_precision: false # Требует ground truth
+  context_recall: false # Требует ground truth
+
+# Настройки LLM для RAGAS judge (используем OpenAI GPT-4o-mini)
+llm:
+  model: gpt-4o-mini
+  api_key: ${oc.env:API_KEY_ROUTER}
+  base_url: https://api.openai.com/v1
+  temperature: 0.0 # Детерминированная оценка
+  max_tokens: 4096

@@ -1,6 +1,7 @@
-"""Метрики для оценки качества retrieval моделей."""
+"""Метрики для оценки качества retrieval моделей и RAG системы."""
 
 import numpy as np
+from datasets import Dataset
 
 
 def recall_at_k(relevant_ids: list[int], retrieved_ids: list[int], k: int) -> float:
@@ -193,3 +194,71 @@ class RetrievalMetrics:
                 }
 
         return results
+
+
+class RAGASMetrics:
+    """Класс для вычисления RAGAS метрик (без ground truth)."""
+
+    def __init__(self, llm):
+        """Инициализация RAGAS метрик.
+
+        Args:
+            llm: LLM для RAGAS judge
+        """
+        self.llm = llm
+        self.samples: list[dict] = []
+
+    def update(
+        self,
+        question: str,
+        answer: str,
+        contexts: list[str],
+    ) -> None:
+        """Добавляет один сэмпл для оценки.
+
+        Args:
+            question: Вопрос пользователя
+            answer: Сгенерированный ответ
+            contexts: Список контекстных документов
+        """
+        self.samples.append(
+            {
+                "question": question,
+                "answer": answer,
+                "contexts": contexts,
+            }
+        )
+
+    def compute(self) -> dict[str, float]:
+        """Вычисляет RAGAS метрики для всех сэмплов.
+
+        Returns:
+            Словарь с метриками
+        """
+        if not self.samples:
+            return {}
+
+        from ragas import evaluate
+        from ragas.metrics import faithfulness
+
+        print(f"\nВычисление RAGAS метрик для {len(self.samples)} сэмплов...")
+
+        dataset = Dataset.from_list(self.samples)
+
+        try:
+            results = evaluate(
+                dataset=dataset,
+                metrics=[faithfulness],
+                llm=self.llm,
+            )
+
+            return {
+                "ragas_faithfulness": results.get("faithfulness", 0.0),
+            }
+        except Exception as e:
+            print(f"Ошибка при вычислении RAGAS метрик: {e}")
+            return {"ragas_error": 1.0}
+
+    def reset(self) -> None:
+        """Сбрасывает накопленные сэмплы."""
+        self.samples = []
