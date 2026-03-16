@@ -4,7 +4,7 @@ api_key: ${oc.env:QDRANT_API_KEY}
 
 # Настройки коллекции
 collection_name: legal_docs_hybrid
-vector_size: 768
+vector_size: 1024 # multilingual-e5-large dimension
 distance: Cosine
 
 # Гибридный поиск

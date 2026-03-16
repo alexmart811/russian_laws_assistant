@@ -36,6 +36,7 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 10
     score_threshold: float | None = None
+    collection: str | None = None  # Опционально: для выбора коллекции
 
 
 class SearchResult(BaseModel):
@@ -61,6 +62,7 @@ class AnswerRequest(BaseModel):
     query: str
     limit: int = 5
     score_threshold: float | None = None
+    collection: str | None = None  # Опционально: для выбора коллекции
 
 
 class AnswerContext(BaseModel):
@@ -77,6 +79,10 @@ class GenerateRequest(BaseModel):
     query: str
     limit: int = 5
     score_threshold: float | None = None
+    answer_type: str = "free_text"  # number, boolean, date, name, names, free_text
+    collection: str | None = (
+        None  # Опционально: для выбора коллекции (difc_docs_hybrid, legal_docs_hybrid)
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -84,6 +90,7 @@ class GenerateResponse(BaseModel):
 
     query: str
     answer: str
+    answer_type: str
     sources: list[dict[str, Any]]
 
 
@@ -204,26 +211,35 @@ async def search(request: SearchRequest) -> SearchResponse:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        query_embedding = embedding_model.encode([request.query])[0]
-        query_vector = query_embedding.cpu().tolist()
+        # Если указана коллекция, временно переключаемся на нее
+        original_collection = config.qdrant.collection_name
+        if request.collection:
+            config.qdrant.collection_name = request.collection
 
-        # Гибридный поиск если включен
-        hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
-        if hybrid_enabled and sparse_encoder is not None:
-            sparse_query = sparse_encoder.encode(request.query)
-            results = qdrant_manager.hybrid_search(
-                dense_vector=query_vector,
-                sparse_vector=sparse_query,
-                limit=request.limit * 3,
-                score_threshold=request.score_threshold,
-            )
-        else:
-            # Fallback на обычный dense поиск
-            results = qdrant_manager.search(
-                query_vector=query_vector,
-                limit=request.limit * 3,
-                score_threshold=request.score_threshold,
-            )
+        try:
+            query_embedding = embedding_model.encode([request.query])[0]
+            query_vector = query_embedding.cpu().tolist()
+
+            # Гибридный поиск если включен
+            hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+            if hybrid_enabled and sparse_encoder is not None:
+                sparse_query = sparse_encoder.encode(request.query)
+                results = qdrant_manager.hybrid_search(
+                    dense_vector=query_vector,
+                    sparse_vector=sparse_query,
+                    limit=request.limit * 3,
+                    score_threshold=request.score_threshold,
+                )
+            else:
+                # Fallback на обычный dense поиск
+                results = qdrant_manager.search(
+                    query_vector=query_vector,
+                    limit=request.limit * 3,
+                    score_threshold=request.score_threshold,
+                )
+        finally:
+            # Восстанавливаем исходную коллекцию
+            config.qdrant.collection_name = original_collection
 
         seen_article_ids: set[int] = set()
         search_results: list[SearchResult] = []
@@ -264,26 +280,35 @@ async def answer(request: AnswerRequest) -> AnswerContext:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        # Выполняем прямой поиск для получения parent_text
-        query_embedding = embedding_model.encode([request.query])[0]
-        query_vector = query_embedding.cpu().tolist()
+        # Если указана коллекция, временно переключаемся на нее
+        original_collection = config.qdrant.collection_name
+        if request.collection:
+            config.qdrant.collection_name = request.collection
 
-        # Гибридный поиск если включен
-        hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
-        if hybrid_enabled and sparse_encoder is not None:
-            sparse_query = sparse_encoder.encode(request.query)
-            results = qdrant_manager.hybrid_search(
-                dense_vector=query_vector,
-                sparse_vector=sparse_query,
-                limit=request.limit,
-                score_threshold=request.score_threshold,
-            )
-        else:
-            results = qdrant_manager.search(
-                query_vector=query_vector,
-                limit=request.limit,
-                score_threshold=request.score_threshold,
-            )
+        try:
+            # Выполняем прямой поиск для получения parent_text
+            query_embedding = embedding_model.encode([request.query])[0]
+            query_vector = query_embedding.cpu().tolist()
+
+            # Гибридный поиск если включен
+            hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+            if hybrid_enabled and sparse_encoder is not None:
+                sparse_query = sparse_encoder.encode(request.query)
+                results = qdrant_manager.hybrid_search(
+                    dense_vector=query_vector,
+                    sparse_vector=sparse_query,
+                    limit=request.limit,
+                    score_threshold=request.score_threshold,
+                )
+            else:
+                results = qdrant_manager.search(
+                    query_vector=query_vector,
+                    limit=request.limit,
+                    score_threshold=request.score_threshold,
+                )
+        finally:
+            # Восстанавливаем исходную коллекцию
+            config.qdrant.collection_name = original_collection
 
         relevant_articles = []
         context_parts = []
@@ -337,29 +362,51 @@ async def answer(request: AnswerRequest) -> AnswerContext:
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest) -> GenerateResponse:
-    """Генерирует ответ на вопрос пользователя на основе релевантных статей."""
+    """Генерирует ответ на вопрос пользователя на основе релевантных статей.
+
+    Поддерживает разные типы ответов:
+    - number: числовой ответ
+    - boolean: true/false
+    - date: дата в формате YYYY-MM-DD
+    - name: имя/сущность
+    - names: массив имен
+    - free_text: развернутый ответ (по умолчанию)
+    """
     if embedding_model is None or qdrant_manager is None or llm_generator is None:
         raise HTTPException(status_code=503, detail="Service not ready")
 
     try:
-        answer_context = await answer(
-            AnswerRequest(
-                query=request.query,
-                limit=request.limit,
-                score_threshold=request.score_threshold,
+        # Если указана коллекция, временно переключаемся на нее
+        original_collection = config.qdrant.collection_name
+        if request.collection:
+            config.qdrant.collection_name = request.collection
+
+        try:
+            answer_context = await answer(
+                AnswerRequest(
+                    query=request.query,
+                    limit=request.limit,
+                    score_threshold=request.score_threshold,
+                    collection=request.collection,
+                )
             )
-        )
 
-        generated_answer = llm_generator.generate(
-            query=request.query,
-            context=answer_context.context_text,
-        )
+            generated_answer = llm_generator.generate(
+                query=request.query,
+                context=answer_context.context_text,
+                answer_type=request.answer_type,
+            )
 
-        return GenerateResponse(
-            query=request.query,
-            answer=generated_answer,
-            sources=answer_context.relevant_articles,
-        )
+            return GenerateResponse(
+                query=request.query,
+                answer=generated_answer,
+                answer_type=request.answer_type,
+                sources=answer_context.relevant_articles,
+            )
+        finally:
+            # Восстанавливаем исходную коллекцию
+            config.qdrant.collection_name = original_collection
+
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error generating answer: {str(e)}"

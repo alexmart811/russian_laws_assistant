@@ -3789,6 +3789,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "6.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/c8/1f40699576c70a6c90d4bf47705a12a0bed1b02964a6bee039016279e126/pypdf-6.9.0.tar.gz", hash = "sha256:a59257869fc575ba2ccc10100a36be0a47cd1bc1fb00f2950abf1d219fa94c01", size = 5311107, upload-time = "2026-03-15T15:28:26.402Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/64/ac6159cfbeabab3cf54873bbf7314b29183c7ff547c9776596d63170d7c0/pypdf-6.9.0-py3-none-any.whl", hash = "sha256:85805ad7457ca878c4cfd1bc026c4b3dcae359b4a80f889fa7e8c5a1c1a83e51", size = 333408, upload-time = "2026-03-15T15:28:24.667Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -4185,6 +4194,7 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "pandas" },
+    { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "qdrant-client" },
     { name = "ragas" },
@@ -4215,6 +4225,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.0" },
     { name = "openai", specifier = ">=2.21.0" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pypdf", specifier = ">=6.9.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "qdrant-client", specifier = ">=1.16.2" },
     { name = "ragas", specifier = ">=0.4.3" },

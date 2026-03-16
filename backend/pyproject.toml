@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=2.4.0",
     "openai>=2.21.0",
     "pandas>=2.3.3",
+    "pypdf>=6.9.0",
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.16.2",
     "ragas>=0.4.3",
