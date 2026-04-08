@@ -1,7 +1,8 @@
 """Метрики для оценки качества retrieval моделей и RAG системы."""
 
 import numpy as np
-from datasets import Dataset
+import openai
+from omegaconf import DictConfig
 
 
 def recall_at_k(relevant_ids: list[int], retrieved_ids: list[int], k: int) -> float:
@@ -196,17 +197,58 @@ class RetrievalMetrics:
         return results
 
 
-class RAGASMetrics:
-    """Класс для вычисления RAGAS метрик (без ground truth)."""
+class RAGMetrics:
+    """Собственные метрики для оценки RAG системы (без RAGAS).
 
-    def __init__(self, llm):
-        """Инициализация RAGAS метрик.
+    Метрики:
+    - Faithfulness: насколько ответ основан на контексте (LLM-as-judge)
+    - Answer Relevance: семантическая близость ответа к вопросу (embeddings)
+    """
+
+    FAITHFULNESS_PROMPT = """Ты — эксперт по оценке качества ответов.
+
+Контекст (документы, на основе которых был сгенерирован ответ):
+{context}
+
+---
+
+Вопрос пользователя: {question}
+
+Ответ системы: {answer}
+
+---
+
+Оцени, насколько ответ ПОЛЕЗЕН и ОСНОВАН на предоставленном контексте:
+- 1.0 = Ответ полностью отвечает на вопрос и основан на контексте
+- 0.5 = Ответ частично отвечает на вопрос или содержит незначительные домыслы
+- 0.0 = Ответ НЕ отвечает на вопрос (включая "информация отсутствует", "не найдено" и т.п.) ИЛИ содержит галлюцинации
+
+Ответь ТОЛЬКО одним числом: 0.0, 0.5 или 1.0"""
+
+    def __init__(self, config: DictConfig):
+        """Инициализация RAG метрик.
 
         Args:
-            llm: LLM для RAGAS judge
+            config: Конфигурация с параметрами LLM и embeddings
         """
-        self.llm = llm
+        self.config = config
         self.samples: list[dict] = []
+
+        # Клиент для LLM (faithfulness)
+        self.llm_client = openai.OpenAI(
+            api_key=config.ragas.llm.api_key,
+            base_url=config.ragas.llm.base_url,
+        )
+        self.llm_model = config.ragas.llm.model
+
+        # Клиент для embeddings (answer relevance)
+        self.embedding_client = openai.OpenAI(
+            api_key=config.ragas.llm.api_key,
+            base_url=config.ragas.llm.base_url,
+        )
+        self.embedding_model = config.ragas.get(
+            "embedding_model", "openai/text-embedding-3-small"
+        )
 
     def update(
         self,
@@ -214,13 +256,7 @@ class RAGASMetrics:
         answer: str,
         contexts: list[str],
     ) -> None:
-        """Добавляет один сэмпл для оценки.
-
-        Args:
-            question: Вопрос пользователя
-            answer: Сгенерированный ответ
-            contexts: Список контекстных документов
-        """
+        """Добавляет один сэмпл для оценки."""
         self.samples.append(
             {
                 "question": question,
@@ -229,36 +265,138 @@ class RAGASMetrics:
             }
         )
 
-    def compute(self) -> dict[str, float]:
-        """Вычисляет RAGAS метрики для всех сэмплов.
+    def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Получает embeddings для списка текстов (батч)."""
+        if not texts:
+            return []
+        response = self.embedding_client.embeddings.create(
+            input=texts,
+            model=self.embedding_model,
+        )
+        return [item.embedding for item in response.data]
 
-        Returns:
-            Словарь с метриками
-        """
+    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
+        """Вычисляет косинусное сходство между двумя векторами."""
+        a = np.array(vec1)
+        b = np.array(vec2)
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    def _compute_faithfulness_single(self, sample: dict) -> float:
+        """Вычисляет faithfulness для одного сэмпла через LLM."""
+        question = sample["question"]
+        answer = sample["answer"]
+        contexts = sample["contexts"]
+
+        context_text = "\n\n---\n\n".join(contexts[:5])  # Ограничиваем до 5 контекстов
+
+        prompt = self.FAITHFULNESS_PROMPT.format(
+            context=context_text,
+            question=question,
+            answer=answer,
+        )
+
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+            content = response.choices[0].message.content
+            if content is None:
+                return 0.5
+            result_text = content.strip()
+
+            # Парсим число из ответа
+            for val in ["1.0", "0.5", "0.0", "1", "0"]:
+                if val in result_text:
+                    return float(val)
+
+            return 0.5
+
+        except Exception as e:
+            print(f"[RAG Metrics] Ошибка faithfulness: {e}")
+            return 0.0
+
+    def compute(self) -> dict[str, float]:
+        """Вычисляет метрики для всех сэмплов (параллельно)."""
         if not self.samples:
             return {}
 
-        from ragas import evaluate
-        from ragas.metrics import faithfulness
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        print(f"\nВычисление RAGAS метрик для {len(self.samples)} сэмплов...")
+        from tqdm import tqdm
 
-        dataset = Dataset.from_list(self.samples)
+        print(f"\n{'=' * 60}")
+        print(f"ВЫЧИСЛЕНИЕ RAG МЕТРИК ({len(self.samples)} сэмплов)")
+        print(f"{'=' * 60}")
+
+        # 1. Батчинг embeddings — один запрос вместо N*2
+        print("[RAG Metrics] Получение embeddings (батч)...")
+        all_texts = []
+        for s in self.samples:
+            all_texts.append(s["question"])
+            all_texts.append(s["answer"])
 
         try:
-            results = evaluate(
-                dataset=dataset,
-                metrics=[faithfulness],
-                llm=self.llm,
-            )
+            all_embeddings = self._get_embeddings_batch(all_texts)
 
-            return {
-                "ragas_faithfulness": results.get("faithfulness", 0.0),
-            }
+            # Вычисляем answer relevance из батча
+            relevance_scores = []
+            for i in range(len(self.samples)):
+                q_emb = all_embeddings[i * 2]
+                a_emb = all_embeddings[i * 2 + 1]
+                rel_score = self._cosine_similarity(q_emb, a_emb)
+                relevance_scores.append(rel_score)
         except Exception as e:
-            print(f"Ошибка при вычислении RAGAS метрик: {e}")
-            return {"ragas_error": 1.0}
+            print(f"[RAG Metrics] Ошибка batch embeddings: {e}")
+            relevance_scores = [0.0] * len(self.samples)
+
+        # 2. Параллельные LLM вызовы для faithfulness
+        print("[RAG Metrics] Вычисление faithfulness (параллельно)...")
+        faithfulness_scores = [0.0] * len(self.samples)
+
+        max_workers = min(10, len(self.samples))  # Не более 10 параллельных запросов
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(self._compute_faithfulness_single, sample): idx
+                for idx, sample in enumerate(self.samples)
+            }
+
+            for future in tqdm(
+                as_completed(future_to_idx),
+                total=len(self.samples),
+                desc="Faithfulness",
+            ):
+                idx = future_to_idx[future]
+                try:
+                    faithfulness_scores[idx] = future.result()
+                except Exception as e:
+                    print(f"[RAG Metrics] Ошибка в потоке {idx}: {e}")
+                    faithfulness_scores[idx] = 0.0
+
+        # Средние значения
+        avg_faithfulness = np.mean(faithfulness_scores) if faithfulness_scores else 0.0
+        avg_relevance = np.mean(relevance_scores) if relevance_scores else 0.0
+
+        print(f"\n[RAG Metrics] Faithfulness scores: {faithfulness_scores}")
+        print(
+            f"[RAG Metrics] Answer Relevance scores: {[f'{s:.3f}' for s in relevance_scores]}"
+        )
+        print(f"[RAG Metrics] Avg Faithfulness: {avg_faithfulness:.4f}")
+        print(f"[RAG Metrics] Avg Answer Relevance: {avg_relevance:.4f}")
+
+        return {
+            "faithfulness": float(avg_faithfulness),
+            "answer_relevance": float(avg_relevance),
+        }
 
     def reset(self) -> None:
         """Сбрасывает накопленные сэмплы."""
         self.samples = []
+
+
+# Алиас для обратной совместимости
+RAGASMetrics = RAGMetrics

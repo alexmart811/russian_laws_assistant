@@ -4,6 +4,9 @@ import torch
 from omegaconf import DictConfig
 from transformers import AutoModel, AutoTokenizer
 
+# Модели, требующие instruction prefix (E5 семейство)
+_E5_MODEL_PREFIXES = ("intfloat/e5-", "intfloat/multilingual-e5-")
+
 
 class EmbeddingModel:
     """Класс для генерации эмбеддингов с использованием трансформеров."""
@@ -21,12 +24,21 @@ class EmbeddingModel:
         self.max_length = config.embedding.max_length
         self.normalize = config.embedding.normalize
         self.pooling = config.embedding.pooling
+        self._requires_prefix = any(
+            self.model_name.startswith(p) for p in _E5_MODEL_PREFIXES
+        ) or config.embedding.get("force_e5_prefix", False)
 
         print(f"Загрузка модели эмбеддингов: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
         self.model.eval()
         print(f"Модель загружена на устройство: {self.device}")
+
+    def _add_prefix(self, texts: list[str], prefix: str) -> list[str]:
+        """Добавляет prefix к текстам если модель этого требует (E5)."""
+        if not self._requires_prefix:
+            return texts
+        return [f"{prefix}{t}" for t in texts]
 
     def _mean_pooling(
         self, token_embeddings: torch.Tensor, attention_mask: torch.Tensor
@@ -77,16 +89,8 @@ class EmbeddingModel:
         return torch.max(token_embeddings, 1)[0]
 
     @torch.no_grad()
-    def encode(self, texts: list[str]) -> torch.Tensor:
-        """Генерирует эмбеддинги для списка текстов.
-
-        Args:
-            texts: Список текстов для кодирования
-
-        Returns:
-            Тензор с эмбеддингами [batch_size, embedding_dim]
-        """
-        # Токенизация
+    def _encode_raw(self, texts: list[str]) -> torch.Tensor:
+        """Внутренний метод: генерирует эмбеддинги без добавления префиксов."""
         encoded = self.tokenizer(
             texts,
             padding=True,
@@ -95,11 +99,9 @@ class EmbeddingModel:
             return_tensors="pt",
         ).to(self.device)
 
-        # Получаем эмбеддинги
         outputs = self.model(**encoded)
         token_embeddings = outputs.last_hidden_state
 
-        # Применяем pooling
         if self.pooling == "mean":
             embeddings = self._mean_pooling(token_embeddings, encoded["attention_mask"])
         elif self.pooling == "cls":
@@ -109,26 +111,51 @@ class EmbeddingModel:
         else:
             raise ValueError(f"Неизвестный тип pooling: {self.pooling}")
 
-        # Нормализация
         if self.normalize:
             embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
         return embeddings
 
-    def encode_batch(self, texts: list[str]) -> list[list[float]]:
+    def encode(self, texts: list[str]) -> torch.Tensor:
+        """Генерирует эмбеддинги для запросов (query prefix для E5).
+
+        Args:
+            texts: Список текстов-запросов для кодирования
+
+        Returns:
+            Тензор с эмбеддингами [batch_size, embedding_dim]
+        """
+        return self._encode_raw(self._add_prefix(texts, "query: "))
+
+    def encode_passages(self, texts: list[str]) -> torch.Tensor:
+        """Генерирует эмбеддинги для документов/пассажей (passage prefix для E5).
+
+        Args:
+            texts: Список текстов-документов для кодирования
+
+        Returns:
+            Тензор с эмбеддингами [batch_size, embedding_dim]
+        """
+        return self._encode_raw(self._add_prefix(texts, "passage: "))
+
+    def encode_batch(
+        self, texts: list[str], is_passage: bool = False
+    ) -> list[list[float]]:
         """Генерирует эмбеддинги для списка текстов с батчингом.
 
         Args:
             texts: Список текстов для кодирования
+            is_passage: True для документов (passage prefix), False для запросов
 
         Returns:
             Список эмбеддингов
         """
         all_embeddings = []
+        encode_fn = self.encode_passages if is_passage else self.encode
 
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
-            embeddings = self.encode(batch)
+            embeddings = encode_fn(batch)
             all_embeddings.append(embeddings.cpu())
 
         all_embeddings = torch.cat(all_embeddings, dim=0)

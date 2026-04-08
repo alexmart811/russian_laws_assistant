@@ -1,5 +1,7 @@
 """FastAPI сервис для RAG-системы поиска статей российского законодательства."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,36 +14,31 @@ from pydantic import BaseModel
 from russian_laws.embeddings import EmbeddingModel
 from russian_laws.generator import LLMGenerator
 from russian_laws.qdrant_manager import QdrantManager
+from russian_laws.reranker import Reranker
 from russian_laws.sparse_encoder import SparseEncoder
 
 load_dotenv()
 
 
-class EmbedRequest(BaseModel):
-    """Запрос на генерацию эмбеддинга."""
+# ─── Pydantic модели ───────────────────────────────────────────────────────────
 
+
+class EmbedRequest(BaseModel):
     text: str
 
 
 class EmbedResponse(BaseModel):
-    """Ответ с эмбеддингом."""
-
     embedding: list[float]
     dimension: int
 
 
 class SearchRequest(BaseModel):
-    """Запрос на поиск релевантных фрагментов."""
-
     query: str
     limit: int = 10
     score_threshold: float | None = None
-    collection: str | None = None  # Опционально: для выбора коллекции
 
 
 class SearchResult(BaseModel):
-    """Результат поиска."""
-
     article_id: int
     article_title: str
     article_text: str
@@ -50,57 +47,131 @@ class SearchResult(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    """Ответ с результатами поиска."""
-
     results: list[SearchResult]
     query_embedding: list[float]
 
 
 class AnswerRequest(BaseModel):
-    """Запрос на подготовку контекста для LLM."""
-
     query: str
     limit: int = 5
     score_threshold: float | None = None
-    collection: str | None = None  # Опционально: для выбора коллекции
 
 
 class AnswerContext(BaseModel):
-    """Контекст для LLM."""
-
     query: str
     relevant_articles: list[dict[str, Any]]
     context_text: str
 
 
 class GenerateRequest(BaseModel):
-    """Запрос на генерацию ответа."""
-
     query: str
     limit: int = 5
     score_threshold: float | None = None
-    answer_type: str = "free_text"  # number, boolean, date, name, names, free_text
-    collection: str | None = (
-        None  # Опционально: для выбора коллекции (difc_docs_hybrid, legal_docs_hybrid)
-    )
+    answer_type: str = "free_text"
 
 
 class GenerateResponse(BaseModel):
-    """Ответ с сгенерированным текстом."""
-
     query: str
     answer: str
     answer_type: str
     sources: list[dict[str, Any]]
 
 
+# ─── Состояние приложения ───────────────────────────────────────────────────────
+
+
+class AppState:
+    """Контейнер для компонентов RAG-пайплайна (без глобальных переменных)."""
+
+    def __init__(self, config: DictConfig):
+        self.config = config
+        self.embedding_model = EmbeddingModel(config)
+
+        hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+        self.sparse_encoder = SparseEncoder(config) if hybrid_enabled else None
+
+        reranker_enabled = config.reranker.get("enabled", False)
+        self.reranker = Reranker(config) if reranker_enabled else None
+
+        self.qdrant_manager = QdrantManager(config)
+        self.llm_generator = LLMGenerator(config)
+
+    def retrieve(
+        self,
+        query: str,
+        limit: int,
+        score_threshold: float | None = None,
+    ) -> tuple[list[Any], list[float]]:
+        """Единый метод retrieval: embed → hybrid/dense search → rerank."""
+        query_vector = self.embedding_model.encode([query])[0].cpu().tolist()
+
+        reranker_enabled = self.config.reranker.get("enabled", False)
+        search_limit = (
+            self.config.reranker.get("candidates_limit", 15)
+            if reranker_enabled
+            else limit
+        )
+
+        hybrid_enabled = self.config.qdrant.get("hybrid", {}).get("enabled", False)
+        if hybrid_enabled and self.sparse_encoder is not None:
+            sparse_query = self.sparse_encoder.encode(query)
+            results = self.qdrant_manager.hybrid_search(
+                dense_vector=query_vector,
+                sparse_vector=sparse_query,
+                limit=search_limit,
+                score_threshold=score_threshold,
+            )
+        else:
+            results = self.qdrant_manager.search(
+                query_vector=query_vector,
+                limit=search_limit,
+                score_threshold=score_threshold,
+            )
+
+        if reranker_enabled and self.reranker is not None and results:
+            documents_for_rerank = [
+                (p.payload or {}).get("parent_text")
+                or (p.payload or {}).get("article_text", "")
+                for p in results
+            ]
+            ranked_indices = self.reranker.rerank(
+                query=query,
+                documents=documents_for_rerank,
+                top_k=limit,
+            )
+            results = [results[idx] for idx in ranked_indices]
+
+        return results, query_vector
+
+    def close(self) -> None:
+        self.qdrant_manager.close()
+
+
+# ─── Lifespan ───────────────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Инициализация и очистка компонентов."""
+    config_dir = Path("conf").absolute()
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        config = compose(config_name="config")
+
+    _app.state.rag = AppState(config)
+    print("Все компоненты инициализированы")
+
+    yield
+
+    _app.state.rag.close()
+
+
 app = FastAPI(
     title="Russian Laws RAG Service",
     description="RAG-сервис для поиска статей российского законодательства",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
-# Настройка CORS для фронтенда
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -109,66 +180,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Глобальные переменные для модели и менеджеров
-embedding_model: EmbeddingModel | None = None
-sparse_encoder: SparseEncoder | None = None
-qdrant_manager: QdrantManager | None = None
-llm_generator: LLMGenerator | None = None
-config: DictConfig | None = None
+
+def _get_state(app_instance: FastAPI) -> AppState:
+    state: AppState | None = getattr(app_instance.state, "rag", None)
+    if state is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return state
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Инициализация при запуске приложения."""
-    global embedding_model, sparse_encoder, qdrant_manager, llm_generator, config
-
-    config_dir = Path("conf").absolute()
-    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        config = compose(config_name="config")
-
-    print(f"Загрузка модели эмбеддингов: {config.embedding.model_name}...")
-    try:
-        embedding_model = EmbeddingModel(config)
-        print("✓ Модель эмбеддингов загружена")
-    except Exception as e:
-        print(f"✗ Ошибка загрузки модели: {e}")
-        raise
-
-    # Инициализируем sparse encoder если включен гибридный режим
-    hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
-    if hybrid_enabled:
-        print("Инициализация sparse encoder...")
-        try:
-            sparse_encoder = SparseEncoder(config)
-            print("✓ Sparse encoder инициализирован")
-        except Exception as e:
-            print(f"✗ Ошибка инициализации sparse encoder: {e}")
-            raise
-
-    print("Инициализация Qdrant...")
-    qdrant_manager = QdrantManager(config)
-    print("✓ Qdrant инициализирован")
-
-    print(f"Инициализация LLM генератора: {config.generator.model}...")
-    try:
-        llm_generator = LLMGenerator(config)
-        print("LLM генератор инициализирован")
-    except Exception as e:
-        print(f"Ошибка инициализации генератора: {e}")
-        raise
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Очистка при завершении приложения."""
-    global qdrant_manager
-    if qdrant_manager:
-        qdrant_manager.close()
+# ─── Эндпоинты ──────────────────────────────────────────────────────────────────
 
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    """Корневой эндпоинт."""
     return {
         "service": "Russian Laws RAG Service",
         "status": "running",
@@ -178,68 +202,32 @@ async def root() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Проверка здоровья сервиса."""
-    if embedding_model is None or qdrant_manager is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
+    _get_state(app)
     return {"status": "healthy", "model_loaded": "true"}
 
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(request: EmbedRequest) -> EmbedResponse:
     """Генерирует эмбеддинг для текста."""
-    if embedding_model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
+    state = _get_state(app)
     try:
-        embedding = embedding_model.encode([request.text])[0]
+        embedding = state.embedding_model.encode([request.text])[0]
         embedding_list = embedding.cpu().tolist()
-
-        return EmbedResponse(
-            embedding=embedding_list,
-            dimension=len(embedding_list),
-        )
+        return EmbedResponse(embedding=embedding_list, dimension=len(embedding_list))
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error generating embedding: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Ошибка эмбеддинга: {e}")
 
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest) -> SearchResponse:
-    """Ищет релевантные фрагменты по запросу (гибридный поиск)."""
-    if embedding_model is None or qdrant_manager is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
+    """Ищет релевантные статьи по запросу."""
+    state = _get_state(app)
     try:
-        # Если указана коллекция, временно переключаемся на нее
-        original_collection = config.qdrant.collection_name
-        if request.collection:
-            config.qdrant.collection_name = request.collection
-
-        try:
-            query_embedding = embedding_model.encode([request.query])[0]
-            query_vector = query_embedding.cpu().tolist()
-
-            # Гибридный поиск если включен
-            hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
-            if hybrid_enabled and sparse_encoder is not None:
-                sparse_query = sparse_encoder.encode(request.query)
-                results = qdrant_manager.hybrid_search(
-                    dense_vector=query_vector,
-                    sparse_vector=sparse_query,
-                    limit=request.limit * 3,
-                    score_threshold=request.score_threshold,
-                )
-            else:
-                # Fallback на обычный dense поиск
-                results = qdrant_manager.search(
-                    query_vector=query_vector,
-                    limit=request.limit * 3,
-                    score_threshold=request.score_threshold,
-                )
-        finally:
-            # Восстанавливаем исходную коллекцию
-            config.qdrant.collection_name = original_collection
+        results, query_vector = state.retrieve(
+            query=request.query,
+            limit=request.limit,
+            score_threshold=request.score_threshold,
+        )
 
         seen_article_ids: set[int] = set()
         search_results: list[SearchResult] = []
@@ -265,50 +253,21 @@ async def search(request: SearchRequest) -> SearchResponse:
             if len(search_results) >= request.limit:
                 break
 
-        return SearchResponse(
-            results=search_results,
-            query_embedding=query_vector,
-        )
+        return SearchResponse(results=search_results, query_embedding=query_vector)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error searching: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка поиска: {e}")
 
 
 @app.post("/answer", response_model=AnswerContext)
 async def answer(request: AnswerRequest) -> AnswerContext:
     """Подготавливает контекст для LLM на основе релевантных статей."""
-    if embedding_model is None or qdrant_manager is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
+    state = _get_state(app)
     try:
-        # Если указана коллекция, временно переключаемся на нее
-        original_collection = config.qdrant.collection_name
-        if request.collection:
-            config.qdrant.collection_name = request.collection
-
-        try:
-            # Выполняем прямой поиск для получения parent_text
-            query_embedding = embedding_model.encode([request.query])[0]
-            query_vector = query_embedding.cpu().tolist()
-
-            # Гибридный поиск если включен
-            hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
-            if hybrid_enabled and sparse_encoder is not None:
-                sparse_query = sparse_encoder.encode(request.query)
-                results = qdrant_manager.hybrid_search(
-                    dense_vector=query_vector,
-                    sparse_vector=sparse_query,
-                    limit=request.limit,
-                    score_threshold=request.score_threshold,
-                )
-            else:
-                results = qdrant_manager.search(
-                    query_vector=query_vector,
-                    limit=request.limit,
-                    score_threshold=request.score_threshold,
-                )
-        finally:
-            # Восстанавливаем исходную коллекцию
-            config.qdrant.collection_name = original_collection
+        results, _ = state.retrieve(
+            query=request.query,
+            limit=request.limit,
+            score_threshold=request.score_threshold,
+        )
 
         relevant_articles = []
         context_parts = []
@@ -317,16 +276,12 @@ async def answer(request: AnswerRequest) -> AnswerContext:
         for point in results:
             payload = point.payload or {}
 
-            # Для parent-child используем parent_text, иначе article_text
             parent_id = payload.get("parent_id")
             if parent_id and parent_id in seen_parent_ids:
-                # Пропускаем дубликаты parent'ов
                 continue
-
             if parent_id:
                 seen_parent_ids.add(parent_id)
 
-            # Извлекаем текст для контекста (parent_text если есть, иначе article_text)
             context_text_chunk = payload.get("parent_text") or payload.get(
                 "article_text", ""
             )
@@ -355,62 +310,37 @@ async def answer(request: AnswerRequest) -> AnswerContext:
             context_text=context_text,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error preparing context: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Ошибка контекста: {e}")
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest) -> GenerateResponse:
-    """Генерирует ответ на вопрос пользователя на основе релевантных статей.
-
-    Поддерживает разные типы ответов:
-    - number: числовой ответ
-    - boolean: true/false
-    - date: дата в формате YYYY-MM-DD
-    - name: имя/сущность
-    - names: массив имен
-    - free_text: развернутый ответ (по умолчанию)
-    """
-    if embedding_model is None or qdrant_manager is None or llm_generator is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
+    """Генерирует ответ на вопрос пользователя на основе релевантных статей."""
+    state = _get_state(app)
     try:
-        # Если указана коллекция, временно переключаемся на нее
-        original_collection = config.qdrant.collection_name
-        if request.collection:
-            config.qdrant.collection_name = request.collection
-
-        try:
-            answer_context = await answer(
-                AnswerRequest(
-                    query=request.query,
-                    limit=request.limit,
-                    score_threshold=request.score_threshold,
-                    collection=request.collection,
-                )
-            )
-
-            generated_answer = llm_generator.generate(
+        answer_context = await answer(
+            AnswerRequest(
                 query=request.query,
-                context=answer_context.context_text,
-                answer_type=request.answer_type,
+                limit=request.limit,
+                score_threshold=request.score_threshold,
             )
-
-            return GenerateResponse(
-                query=request.query,
-                answer=generated_answer,
-                answer_type=request.answer_type,
-                sources=answer_context.relevant_articles,
-            )
-        finally:
-            # Восстанавливаем исходную коллекцию
-            config.qdrant.collection_name = original_collection
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error generating answer: {str(e)}"
         )
+
+        result = state.llm_generator.generate(
+            query=request.query,
+            context=answer_context.context_text,
+            answer_type=request.answer_type,
+        )
+        generated_answer = result if isinstance(result, str) else result[0]
+
+        return GenerateResponse(
+            query=request.query,
+            answer=generated_answer,
+            answer_type=request.answer_type,
+            sources=answer_context.relevant_articles,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации: {e}")
 
 
 if __name__ == "__main__":

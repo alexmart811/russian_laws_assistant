@@ -10,8 +10,10 @@ distance: Cosine
 # Гибридный поиск
 hybrid:
   enabled: true
-  alpha: 0.9 # Вес комбинирования (0.5 = баланс dense/sparse)
+  fusion_strategy: union_rerank # weighted_sum или union_rerank
+  alpha: 0.5 # Вес комбинирования для weighted_sum (0.5 = баланс dense/sparse)
   sparse_modifier: idf # BM25-подобное взвешивание
+  candidates_per_method: 3 # Top-k для каждого метода при union_rerank
 
 # Параметры индексации
 on_disk: false

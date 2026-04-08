@@ -1,19 +1,15 @@
-# Конфигурация для RAGAS метрик
+# Конфигурация для RAG метрик (собственная реализация)
 
-# Включение RAGAS метрик
+# Включение RAG метрик
 enabled: true
 
-# Какие метрики вычислять (без ground truth)
-metrics:
-  faithfulness: true # Соответствие ответа контексту
-  answer_relevancy: false # Требует embeddings (отключена)
-  context_precision: false # Требует ground truth
-  context_recall: false # Требует ground truth
-
-# Настройки LLM для RAGAS judge (используем OpenAI GPT-4o-mini)
+# Настройки LLM для judge (faithfulness)
 llm:
-  model: gpt-4o-mini
+  model: qwen/qwen3.5-flash
   api_key: ${oc.env:API_KEY_ROUTER}
-  base_url: https://api.openai.com/v1
-  temperature: 0.0 # Детерминированная оценка
+  base_url: https://api.vsellm.ru/v1
+  temperature: 0.0
   max_tokens: 4096
+
+# Модель для embeddings (answer relevance)
+embedding_model: openai/text-embedding-3-small

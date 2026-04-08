@@ -271,9 +271,8 @@ class ArticleIndexer:
 
                 for parent in hierarchy:
                     for child in parent["children"]:
-                        # Вектор генерируем для CHILD текста (маленький)
                         child_text = child["child_text"]
-                        embedding = self.embedding_model.encode([child_text])[
+                        embedding = self.embedding_model.encode_passages([child_text])[
                             0
                         ].tolist()
 
@@ -324,7 +323,9 @@ class ArticleIndexer:
 
                 # Создаем точку для каждого чанка
                 for chunk_idx, chunk in enumerate(chunks):
-                    embedding = self.embedding_model.encode([chunk])[0].tolist()
+                    embedding = self.embedding_model.encode_passages([chunk])[
+                        0
+                    ].tolist()
 
                     # Генерируем sparse вектор если гибридный режим включен
                     if self.hybrid_enabled and self.sparse_encoder:
@@ -360,8 +361,7 @@ class ArticleIndexer:
                         self.qdrant_manager.upsert_points(points)
                         points = []
             else:
-                # БЕЗ ЧАНКИРОВАНИЯ
-                embedding = self.embedding_model.encode([text])[0].tolist()
+                embedding = self.embedding_model.encode_passages([text])[0].tolist()
 
                 # Генерируем sparse вектор если гибридный режим включен
                 if self.hybrid_enabled and self.sparse_encoder:

@@ -1,9 +1,14 @@
 """Модуль генератора ответов на основе OpenAI API."""
 
+import json
 import re
 
 import openai
 from omegaconf import DictConfig
+
+_NO_INFO_ANSWER = (
+    "В предоставленных документах информация по этому вопросу отсутствует."
+)
 
 
 class LLMGenerator:
@@ -21,20 +26,41 @@ class LLMGenerator:
         self.max_tokens = getattr(config.generator, "max_tokens", 512)
         self.temperature = getattr(config.generator, "temperature", 0.7)
 
-        # Инициализация OpenAI клиента
         self.client = openai.OpenAI(
             api_key=config.generator.api_key,
             base_url=config.generator.base_url,
         )
 
-        # Инструкции по форматам ответов для разных типов
         self.answer_format_instructions = {
-            "number": "\n\nIMPORTANT: Answer with ONLY a number (int or float). No explanation or additional text. If the information is not available in the provided context, return exactly: null",
-            "boolean": "\n\nIMPORTANT: Answer with ONLY 'true' or 'false'. No explanation or additional text. If the information is not available in the provided context, return exactly: null",
-            "date": "\n\nIMPORTANT: Answer with ONLY a date in ISO 8601 format (YYYY-MM-DD). No explanation or additional text. If the information is not available in the provided context, return exactly: null",
-            "name": "\n\nIMPORTANT: Answer with ONLY the name/entity requested. No explanation or additional text. If the information is not available in the provided context, return exactly: null",
-            "names": '\n\nIMPORTANT: Answer with ONLY a JSON array of names: ["name1", "name2"]. No explanation or additional text. If the information is not available in the provided context, return exactly: null',
-            "free_text": '\n\nProvide a comprehensive answer (1-3 paragraphs, maximum 280 characters). If the information is not available in the provided context, return exactly: "There is no information on this question in the provided documents."',
+            "number": (
+                "\n\nВАЖНО: Ответь ТОЛЬКО числом (целым или дробным). "
+                "Без пояснений и дополнительного текста. "
+                "Если информации нет в контексте, верни: null"
+            ),
+            "boolean": (
+                "\n\nВАЖНО: Ответь ТОЛЬКО 'true' или 'false'. "
+                "Без пояснений и дополнительного текста. "
+                "Если информации нет в контексте, верни: null"
+            ),
+            "date": (
+                "\n\nВАЖНО: Ответь ТОЛЬКО датой в формате ISO 8601 (YYYY-MM-DD). "
+                "Без пояснений и дополнительного текста. "
+                "Если информации нет в контексте, верни: null"
+            ),
+            "name": (
+                "\n\nВАЖНО: Ответь ТОЛЬКО запрашиваемым именем/названием. "
+                "Без пояснений и дополнительного текста. "
+                "Если информации нет в контексте, верни: null"
+            ),
+            "names": (
+                '\n\nВАЖНО: Ответь ТОЛЬКО JSON массивом имён: ["имя1", "имя2"]. '
+                "Без пояснений и дополнительного текста. "
+                "Если информации нет в контексте, верни: null"
+            ),
+            "free_text": (
+                "\n\nДай исчерпывающий ответ (1-3 абзаца, не более 280 символов). "
+                f'Если информации нет в контексте, верни: "{_NO_INFO_ANSWER}"'
+            ),
         }
 
         print(f"LLM генератор инициализирован (модель: {self.model_name})")
@@ -51,7 +77,7 @@ class LLMGenerator:
         Args:
             query: Вопрос пользователя
             context: Контекст из релевантных статей законов
-            answer_type: Тип ожидаемого ответа (number, boolean, date, name, names, free_text)
+            answer_type: Тип ожидаемого ответа
             return_usage: Если True, возвращает кортеж (ответ, usage_info)
 
         Returns:
@@ -72,16 +98,14 @@ class LLMGenerator:
         )
 
         answer = response.choices[0].message.content
-
-        # Постобработка для структурированных ответов
         processed_answer = self._postprocess_answer(answer, answer_type)
 
         if return_usage:
             usage_info = {
                 "input_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "output_tokens": response.usage.completion_tokens
-                if response.usage
-                else 0,
+                "output_tokens": (
+                    response.usage.completion_tokens if response.usage else 0
+                ),
             }
             return processed_answer, usage_info
 
@@ -90,93 +114,57 @@ class LLMGenerator:
     def _build_user_prompt(
         self, query: str, context: str, answer_type: str = "free_text"
     ) -> str:
-        """Формирует промпт для LLM.
-
-        Args:
-            query: Вопрос пользователя
-            context: Контекст из статей законов
-            answer_type: Тип ожидаемого ответа
-
-        Returns:
-            Сформированный промпт
-        """
-        # Добавляем инструкцию по формату ответа
+        """Формирует промпт для LLM."""
         format_instruction = self.answer_format_instructions.get(
             answer_type, self.answer_format_instructions["free_text"]
         )
 
-        return f"""Контекст (релевантные статьи законов):
-{context}
-
----
-
-Вопрос пользователя: {query}
-{format_instruction}
-
-Дай точный и структурированный ответ на основе предоставленного контекста."""
+        return (
+            f"Контекст (релевантные статьи законов):\n{context}\n\n---\n\n"
+            f"Вопрос пользователя: {query}\n{format_instruction}\n\n"
+            "Дай точный и структурированный ответ на основе предоставленного контекста."
+        )
 
     def _postprocess_answer(self, answer: str, answer_type: str) -> str:
-        """Постобработка и валидация ответа.
-
-        Args:
-            answer: Сырой ответ от LLM
-            answer_type: Ожидаемый тип ответа
-
-        Returns:
-            Очищенный и валидированный ответ
-        """
+        """Постобработка и валидация ответа."""
         answer = answer.strip()
 
-        # Если ответ указывает на отсутствие информации, возвращаем как есть
-        if (
-            answer.lower() == "null"
-            or answer
-            == "There is no information on this question in the provided documents."
-        ):
+        if answer.lower() == "null" or answer == _NO_INFO_ANSWER:
             return answer
 
         if answer_type == "number":
-            # Извлекаем первое число
             match = re.search(r"-?\d+\.?\d*", answer)
             return match.group(0) if match else answer
 
-        elif answer_type == "boolean":
-            # Нормализуем к true/false
+        if answer_type == "boolean":
             answer_lower = answer.lower()
-            if "true" in answer_lower or "yes" in answer_lower:
+            if any(w in answer_lower for w in ("true", "yes", "да")):
                 return "true"
-            elif "false" in answer_lower or "no" in answer_lower:
+            if any(w in answer_lower for w in ("false", "no", "нет")):
                 return "false"
             return answer
 
-        elif answer_type == "date":
-            # Извлекаем дату в формате YYYY-MM-DD
+        if answer_type == "date":
             match = re.search(r"\d{4}-\d{2}-\d{2}", answer)
             return match.group(0) if match else answer
 
-        elif answer_type == "name":
-            # Убираем лишние слова типа "The name is", оставляем только имя
+        if answer_type == "name":
             answer = re.sub(
-                r"^(?:The\s+)?(?:name|entity|person)\s+is\s+",
+                r"^(?:(?:The|Это)\s+)?(?:name|entity|person|название|имя)\s+(?:is|—|:)\s+",
                 "",
                 answer,
                 flags=re.IGNORECASE,
             )
             return answer.strip()
 
-        elif answer_type == "names":
-            # Пробуем извлечь JSON массив или список через запятую
-            try:
-                import json
-
-                # Ищем JSON массив в тексте
-                json_match = re.search(r"\[.*?\]", answer, re.DOTALL)
-                if json_match:
+        if answer_type == "names":
+            json_match = re.search(r"\[.*?\]", answer, re.DOTALL)
+            if json_match:
+                try:
                     names = json.loads(json_match.group(0))
-                    return json.dumps(names)
-            except:
-                pass
+                    return json.dumps(names, ensure_ascii=False)
+                except (json.JSONDecodeError, TypeError):
+                    pass
             return answer
 
-        # Для free_text возвращаем как есть
         return answer

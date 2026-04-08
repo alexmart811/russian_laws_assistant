@@ -1,0 +1,16 @@
+# Конфигурация для reranker
+
+# Включение reranker
+enabled: true
+
+# Модель для переранжирования
+model_name: "BAAI/bge-reranker-v2-m3"
+
+# Устройство для выполнения
+device: cuda
+
+# Количество документов после reranking
+top_k: 5
+
+# Количество кандидатов для reranking (limit в hybrid_search)
+candidates_limit: 15

@@ -3,6 +3,7 @@ defaults:
   - qdrant: default
   - embedding: default
   - sparse: default
+  - reranker: default
   - ragas: default
   - train: default
   - generator: default

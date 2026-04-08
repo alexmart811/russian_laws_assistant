@@ -7,9 +7,7 @@ import pandas as pd
 import pytorch_lightning as pl
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
-from openai import OpenAI
 from pytorch_lightning.loggers import MLFlowLogger
-from ragas.llms import llm_factory
 from russian_laws.embeddings import EmbeddingModel
 from russian_laws.generator import LLMGenerator
 from russian_laws.indexer import ArticleIndexer
@@ -85,10 +83,12 @@ class RetrievalTester(pl.LightningModule):
         self.embedding_model = None
         self.sparse_encoder = None
         self.qdrant_manager = None
+        self.reranker = None
         self.llm_generator = None
         self.metrics = RetrievalMetrics(k_values=self.k_values)
         self.ragas_metrics = None
         self.hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
+        self.reranker_enabled = config.reranker.get("enabled", False)
         self.ragas_enabled = config.ragas.get("enabled", False)
 
     def setup(self, stage: str | None = None) -> None:
@@ -120,31 +120,24 @@ class RetrievalTester(pl.LightningModule):
             # Инициализация Qdrant менеджера
             self.qdrant_manager = QdrantManager(self.config)
 
-            # Инициализируем LLM генератор для RAGAS
+            # Инициализируем reranker
+            if self.reranker_enabled:
+                from russian_laws.reranker import Reranker
+
+                print("\nИнициализация reranker...")
+                self.reranker = Reranker(self.config)
+
+            # Инициализируем LLM генератор и RAG метрики
             if self.ragas_enabled:
                 print("\nИнициализация LLM для генерации ответов...")
                 self.llm_generator = LLMGenerator(self.config)
                 print("✓ LLM генератор инициализирован")
 
-                # Инициализируем RAGAS метрики
-                print("\nИнициализация RAGAS метрик...")
-
-                # LLM для RAGAS judge через llm_factory (GPT-4o-mini)
-                openai_client = OpenAI(
-                    api_key=self.config.ragas.llm.api_key,
-                    base_url=self.config.ragas.llm.base_url,
-                )
-
-                ragas_llm = llm_factory(
-                    model=self.config.ragas.llm.model,
-                    client=openai_client,
-                    max_tokens=self.config.ragas.llm.get("max_tokens", 4096),
-                    temperature=self.config.ragas.llm.get("temperature", 0.0),
-                )
-
-                self.ragas_metrics = RAGASMetrics(llm=ragas_llm)
+                # Инициализируем RAG метрики (собственная реализация)
+                print("\nИнициализация RAG метрик...")
+                self.ragas_metrics = RAGASMetrics(config=self.config)
                 print(
-                    f"✓ RAGAS метрики инициализированы (модель: {self.config.ragas.llm.model})"
+                    f"✓ RAG метрики инициализированы (judge: {self.config.ragas.llm.model})"
                 )
 
             print("Компоненты инициализированы")
@@ -182,18 +175,36 @@ class RetrievalTester(pl.LightningModule):
 
         # Ищем в Qdrant (гибридный поиск если включен)
         max_k = max(self.k_values)
+        search_limit = (
+            int(self.config.reranker.get("candidates_limit", 50))
+            if self.reranker_enabled
+            else max_k
+        )
+
         if self.hybrid_enabled and self.sparse_encoder is not None:
             sparse_query = self.sparse_encoder.encode(query_text)
             results = self.qdrant_manager.hybrid_search(
                 dense_vector=query_embedding,
                 sparse_vector=sparse_query,
-                limit=max_k,
+                limit=search_limit,
                 score_threshold=0.0,
             )
         else:
             results = self.qdrant_manager.search(
-                query_vector=query_embedding, limit=max_k, score_threshold=0.0
+                query_vector=query_embedding, limit=search_limit, score_threshold=0.0
             )
+
+        # Переранжирование
+        if self.reranker_enabled and self.reranker is not None and results:
+            docs = [
+                (p.payload or {}).get("parent_text")
+                or (p.payload or {}).get("article_text", "")
+                for p in results
+            ]
+            ranked_indices = self.reranker.rerank(
+                query=query_text, documents=docs, top_k=max_k
+            )
+            results = [results[idx] for idx in ranked_indices]
 
         # Извлекаем ID найденных статей (убираем дубликаты, сохраняя порядок)
         retrieved_ids = []
@@ -224,10 +235,25 @@ class RetrievalTester(pl.LightningModule):
                 try:
                     # Объединяем контексты в один текст
                     context_text = "\n\n".join(contexts)
-                    answer = self.llm_generator.generate(query_text, context_text)
-                    # Обновляем RAGAS метрики
+                    result = self.llm_generator.generate(query_text, context_text)
+                    answer_text = result if isinstance(result, str) else result[0]
+
+                    # Debug: показываем что передаём в RAGAS
+                    print("\n[RAGAS INPUT DEBUG]")
+                    print(f"  Question: {query_text[:100]}...")
+                    print(
+                        f"  Answer: {answer_text[:200]}..."
+                        if len(answer_text) > 200
+                        else f"  Answer: {answer_text}"
+                    )
+                    print(
+                        f"  Contexts ({len(contexts)}): {contexts[0][:150]}..."
+                        if contexts
+                        else "  Contexts: []"
+                    )
+
                     self.ragas_metrics.update(
-                        question=query_text, answer=answer, contexts=contexts
+                        question=query_text, answer=answer_text, contexts=contexts
                     )
                 except Exception as e:
                     print(f"Ошибка генерации ответа для RAGAS: {e}")
@@ -271,6 +297,8 @@ def run_test(
     index_articles: bool = True,
     experiment_name: str = "russian_laws_retrieval",
     run_name: str = "baseline_test",
+    config_overrides: str = "",
+    limit: int | None = None,
 ) -> dict:
     """Запускает тестирование retrieval модели.
 
@@ -281,25 +309,17 @@ def run_test(
         index_articles: Индексировать ли статьи перед тестированием
         experiment_name: Название эксперимента MLflow
         run_name: Название run в MLflow
+        config_overrides: Hydra-overrides через запятую (напр. "qdrant.hybrid.enabled=false,reranker.enabled=true")
+        limit: Ограничить количество тестовых запросов (для отладки)
 
     Returns:
         Словарь с метриками
     """
-    # print("Загрузка данных через DVC...")
-    # project_root = Path(__file__).parent.parent
-    # download_script = project_root / "scripts" / "download_files.sh"
+    overrides = [o.strip() for o in config_overrides.split(",") if o.strip()]
 
-    # subprocess.run(
-    #     ["bash", str(download_script)],
-    #     cwd=str(project_root),
-    #     check=True,
-    # )
-    # print("Данные загружены")
-
-    # Загружаем конфигурацию
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        cfg = compose(config_name="config")
+        cfg = compose(config_name="config", overrides=overrides)
 
     # Используем модель из конфига, если не передана явно
     model_name = model_name or cfg.embedding.model_name
@@ -330,13 +350,35 @@ def run_test(
     # Загружаем данные
     print(f"\nЗагрузка тестовых данных из {test_data}")
     test_df = pd.read_csv(test_data)
-    print(f"Загружено {len(test_df)} тестовых запросов")
+    if limit is not None:
+        test_df = test_df.head(limit)
+        print(f"Загружено {len(test_df)} тестовых запросов (limit={limit})")
+    else:
+        print(f"Загружено {len(test_df)} тестовых запросов")
 
     # Индексируем статьи, если требуется
     if index_articles:
         print(f"\nЗагрузка статей из {articles_data}")
         articles_df = pd.read_csv(articles_data)
-        print(f"Загружено {len(articles_df)} статей")
+
+        # В режиме отладки ограничиваем число статей
+        if limit is not None:
+            # Берём статьи, на которые ссылаются тестовые запросы + немного дополнительных
+            relevant_ids = list(test_df["article_id"].tolist())
+            relevant_articles = articles_df[
+                articles_df["article_id"].isin(relevant_ids)
+            ]
+            other_articles = articles_df[
+                ~articles_df["article_id"].isin(relevant_ids)
+            ].head(limit * 10)
+            articles_df = pd.concat(
+                [relevant_articles, other_articles], ignore_index=True
+            )
+            print(
+                f"Загружено {len(articles_df)} статей (режим отладки: релевантные + {limit * 10} дополнительных)"
+            )
+        else:
+            print(f"Загружено {len(articles_df)} статей")
 
         tester.index_articles(articles_df)
 
