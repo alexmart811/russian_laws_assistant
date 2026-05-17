@@ -32,15 +32,11 @@
 - **Чанкирование:** Parent-child (маленькие child-чанки для поиска, большие parent-чанки для LLM)
 - **Модель:** `Roflmax/bge-m3-legal-ru-cocktail-40-60` (дообученная BGE-M3)
 
-## Датасеты
+## Датасет
 
-### [Russian Legal Documents](https://www.kaggle.com/datasets/nzibben/20-russian-legal-documents)
+### [RRNCB RAG Benchmark](https://fractalagents.ai/rrncb-rag-benchmark/)
 
-~2000 страниц российских юридических документов (docx, rtf, pdf форматы, ~800К слов).
-
-### [Rossiyskaya Gazeta Papers](https://www.kaggle.com/datasets/athugodage/russian-legal-text-parallel-corpus)
-
-Законодательные документы с сайта «Российской газеты» (31.12.2008 — 28.11.2022), 2963 записи в формате CSV.
+Публичный бенчмарк для оценки качества поиска по российскому законодательству. Содержит 200 пар «вопрос — эталонный ответ» с привязкой к конкретному документу-источнику (PDF). Охватывает 53 документа: российские кодексы (Налоговый, Арбитражный процессуальный, Жилищный и др.) и нормативно-технические документы.
 
 ## Архитектура
 
