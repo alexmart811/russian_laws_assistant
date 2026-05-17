@@ -1,0 +1,13 @@
+# Vector store backend = Weaviate.
+# HNSW-параметры и distance унаследуются из секции `qdrant` основного конфига —
+# это даёт честное сравнение latency при одинаковой геометрии индекса.
+backend: weaviate
+
+collection_name: LegalDocs
+
+http_host: ${oc.env:WEAVIATE_HTTP_HOST,localhost}
+http_port: ${oc.env:WEAVIATE_HTTP_PORT,8080}
+http_secure: false
+grpc_host: ${oc.env:WEAVIATE_GRPC_HOST,localhost}
+grpc_port: ${oc.env:WEAVIATE_GRPC_PORT,50051}
+grpc_secure: false

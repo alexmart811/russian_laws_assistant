@@ -1,13 +1,13 @@
 # Конфигурация для reranker
 
 # Включение reranker
-enabled: true
+enabled: false
 
 # Модель для переранжирования
 model_name: "BAAI/bge-reranker-v2-m3"
 
 # Устройство для выполнения
-device: cuda
+device: cpu
 
 # Количество документов после reranking
 top_k: 5

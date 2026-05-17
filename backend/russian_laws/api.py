@@ -1,5 +1,3 @@
-"""FastAPI сервис для RAG-системы поиска статей российского законодательства."""
-
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,9 +16,6 @@ from russian_laws.reranker import Reranker
 from russian_laws.sparse_encoder import SparseEncoder
 
 load_dotenv()
-
-
-# ─── Pydantic модели ───────────────────────────────────────────────────────────
 
 
 class EmbedRequest(BaseModel):
@@ -77,12 +72,7 @@ class GenerateResponse(BaseModel):
     sources: list[dict[str, Any]]
 
 
-# ─── Состояние приложения ───────────────────────────────────────────────────────
-
-
 class AppState:
-    """Контейнер для компонентов RAG-пайплайна (без глобальных переменных)."""
-
     def __init__(self, config: DictConfig):
         self.config = config
         self.embedding_model = EmbeddingModel(config)
@@ -102,7 +92,6 @@ class AppState:
         limit: int,
         score_threshold: float | None = None,
     ) -> tuple[list[Any], list[float]]:
-        """Единый метод retrieval: embed → hybrid/dense search → rerank."""
         query_vector = self.embedding_model.encode([query])[0].cpu().tolist()
 
         reranker_enabled = self.config.reranker.get("enabled", False)
@@ -147,12 +136,8 @@ class AppState:
         self.qdrant_manager.close()
 
 
-# ─── Lifespan ───────────────────────────────────────────────────────────────────
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Инициализация и очистка компонентов."""
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         config = compose(config_name="config")
@@ -188,9 +173,6 @@ def _get_state(app_instance: FastAPI) -> AppState:
     return state
 
 
-# ─── Эндпоинты ──────────────────────────────────────────────────────────────────
-
-
 @app.get("/")
 async def root() -> dict[str, str]:
     return {
@@ -208,7 +190,6 @@ async def health() -> dict[str, str]:
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(request: EmbedRequest) -> EmbedResponse:
-    """Генерирует эмбеддинг для текста."""
     state = _get_state(app)
     try:
         embedding = state.embedding_model.encode([request.text])[0]
@@ -220,7 +201,6 @@ async def embed(request: EmbedRequest) -> EmbedResponse:
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest) -> SearchResponse:
-    """Ищет релевантные статьи по запросу."""
     state = _get_state(app)
     try:
         results, query_vector = state.retrieve(
@@ -260,7 +240,6 @@ async def search(request: SearchRequest) -> SearchResponse:
 
 @app.post("/answer", response_model=AnswerContext)
 async def answer(request: AnswerRequest) -> AnswerContext:
-    """Подготавливает контекст для LLM на основе релевантных статей."""
     state = _get_state(app)
     try:
         results, _ = state.retrieve(
@@ -282,9 +261,7 @@ async def answer(request: AnswerRequest) -> AnswerContext:
             if parent_id:
                 seen_parent_ids.add(parent_id)
 
-            context_text_chunk = payload.get("parent_text") or payload.get(
-                "article_text", ""
-            )
+            context_text_chunk = payload.get("parent_text") or payload.get("article_text", "")
 
             article_data = {
                 "article_id": payload.get("article_id"),
@@ -302,12 +279,10 @@ async def answer(request: AnswerRequest) -> AnswerContext:
                 f"Релевантность: {point.score:.4f}\n"
             )
 
-        context_text = "\n---\n".join(context_parts)
-
         return AnswerContext(
             query=request.query,
             relevant_articles=relevant_articles,
-            context_text=context_text,
+            context_text="\n---\n".join(context_parts),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка контекста: {e}")
@@ -315,7 +290,6 @@ async def answer(request: AnswerRequest) -> AnswerContext:
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest) -> GenerateResponse:
-    """Генерирует ответ на вопрос пользователя на основе релевантных статей."""
     state = _get_state(app)
     try:
         answer_context = await answer(

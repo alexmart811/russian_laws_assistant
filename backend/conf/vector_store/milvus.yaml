@@ -1,0 +1,9 @@
+backend: milvus
+
+# Имя отражает конфигурацию: BGE-M3, parent-child, hybrid
+collection_name: legal_docs_bge_m3_pc_hybrid
+
+uri: ${oc.env:MILVUS_URI,http://localhost:19530}
+token: ${oc.env:MILVUS_TOKEN,""}
+
+rrf_k: 60

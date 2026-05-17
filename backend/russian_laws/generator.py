@@ -1,5 +1,3 @@
-"""Модуль генератора ответов на основе OpenAI API."""
-
 import json
 import re
 
@@ -12,15 +10,7 @@ _NO_INFO_ANSWER = (
 
 
 class LLMGenerator:
-    """Генератор ответов с использованием OpenAI API (через роутер)."""
-
     def __init__(self, config: DictConfig):
-        """Инициализация генератора.
-
-        Args:
-            config: Конфигурация Hydra с параметрами генератора
-        """
-        self.config = config
         self.model_name = config.generator.model
         self.system_prompt = config.generator.system_prompt
         self.max_tokens = getattr(config.generator, "max_tokens", 512)
@@ -58,8 +48,11 @@ class LLMGenerator:
                 "Если информации нет в контексте, верни: null"
             ),
             "free_text": (
-                "\n\nДай исчерпывающий ответ (1-3 абзаца, не более 280 символов). "
-                f'Если информации нет в контексте, верни: "{_NO_INFO_ANSWER}"'
+                "\n\nДай развёрнутый ответ (до ~1500 символов): сначала прямую "
+                "формулировку нормы со ссылкой на кодекс и номер статьи, затем "
+                "при необходимости кратко поясни условия применения. "
+                f'Только если в контексте действительно нет ничего по теме — '
+                f'верни: "{_NO_INFO_ANSWER}"'
             ),
         }
 
@@ -72,17 +65,6 @@ class LLMGenerator:
         answer_type: str = "free_text",
         return_usage: bool = False,
     ) -> str | tuple[str, dict]:
-        """Генерирует ответ на основе запроса и контекста.
-
-        Args:
-            query: Вопрос пользователя
-            context: Контекст из релевантных статей законов
-            answer_type: Тип ожидаемого ответа
-            return_usage: Если True, возвращает кортеж (ответ, usage_info)
-
-        Returns:
-            Сгенерированный ответ или кортеж (ответ, usage_info)
-        """
         user_prompt = self._build_user_prompt(query, context, answer_type)
 
         messages = [
@@ -114,11 +96,9 @@ class LLMGenerator:
     def _build_user_prompt(
         self, query: str, context: str, answer_type: str = "free_text"
     ) -> str:
-        """Формирует промпт для LLM."""
         format_instruction = self.answer_format_instructions.get(
             answer_type, self.answer_format_instructions["free_text"]
         )
-
         return (
             f"Контекст (релевантные статьи законов):\n{context}\n\n---\n\n"
             f"Вопрос пользователя: {query}\n{format_instruction}\n\n"
@@ -126,7 +106,6 @@ class LLMGenerator:
         )
 
     def _postprocess_answer(self, answer: str, answer_type: str) -> str:
-        """Постобработка и валидация ответа."""
         answer = answer.strip()
 
         if answer.lower() == "null" or answer == _NO_INFO_ANSWER:

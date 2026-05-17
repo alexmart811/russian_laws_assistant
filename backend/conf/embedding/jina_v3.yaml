@@ -1,0 +1,34 @@
+# Jina Embeddings v3 — multilingual retrieval с task-специфичными LoRA адаптерами.
+# Модель загружается через trust_remote_code и кодирует через model.encode(task=...).
+model_name: "jinaai/jina-embeddings-v3"
+device: cuda
+batch_size: 16
+max_length: 1024  # модель поддерживает до 8192, но 1024 хватает и быстрее
+
+# Нормализация и pooling задаются внутри модели,
+# но оставим флаги для совместимости с пайплайном.
+normalize: true
+pooling: mean
+
+# Загрузка кастомного кода из репозитория модели (обязательно для Jina v3)
+trust_remote_code: true
+
+# Matryoshka: можно усечь до 32/64/128/256/512/768/1024.
+# null = полная размерность 1024.
+truncate_dim: null
+
+# Параметры чанкирования (одинаковые для всех моделей)
+chunking:
+  enabled: true
+  strategy: parent_child
+
+  chunk_size: 500
+  chunk_overlap: 50
+
+  child:
+    min_size: 30
+    max_size: 300
+  parent:
+    children_per_parent: 3
+    max_size: 500
+    overlap: false

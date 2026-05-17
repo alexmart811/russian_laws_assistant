@@ -1,7 +1,8 @@
 # Основной конфигурационный файл
 defaults:
   - qdrant: default
-  - embedding: default
+  - vector_store: milvus
+  - embedding: bge_m3_legal_ru
   - sparse: default
   - reranker: default
   - ragas: default

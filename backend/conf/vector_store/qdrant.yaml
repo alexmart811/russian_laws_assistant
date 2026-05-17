@@ -1,0 +1,4 @@
+# Vector store backend = Qdrant (default).
+# Все параметры берутся из секции `qdrant` основного конфига —
+# здесь только маркер выбора backend-а.
+backend: qdrant

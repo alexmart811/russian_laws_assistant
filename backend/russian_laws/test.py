@@ -1,5 +1,3 @@
-"""Модуль для тестирования retrieval модели с использованием PyTorch Lightning."""
-
 from pathlib import Path
 
 import fire
@@ -11,144 +9,123 @@ from pytorch_lightning.loggers import MLFlowLogger
 from russian_laws.embeddings import EmbeddingModel
 from russian_laws.generator import LLMGenerator
 from russian_laws.indexer import ArticleIndexer
-from russian_laws.metrics import RAGASMetrics, RetrievalMetrics
+from russian_laws.metrics import (
+    LatencyMetrics,
+    RAGASMetrics,
+    RetrievalMetrics,
+    RougeMetrics,
+)
 from russian_laws.qdrant_manager import QdrantManager
 from russian_laws.sparse_encoder import SparseEncoder
+from russian_laws.vector_stores import VectorStore, make_vector_store
 from torch.utils.data import DataLoader, Dataset
 
 
 class QueryDataset(Dataset):
-    """Dataset для тестовых запросов."""
-
     def __init__(self, queries_df: pd.DataFrame):
-        """Инициализация датасета.
-
-        Args:
-            queries_df: DataFrame с тестовыми запросами
-        """
         self.queries_df = queries_df
 
     def __len__(self) -> int:
-        """Возвращает размер датасета."""
         return len(self.queries_df)
 
     def __getitem__(self, idx: int) -> dict:
-        """Возвращает элемент датасета по индексу.
-
-        Args:
-            idx: Индекс элемента
-
-        Returns:
-            Словарь с query_text и article_id
-        """
+        # relevant_ids передаётся как pipe-separated строка — DataLoader
+        # не поддерживает списки переменной длины в батче
         row = self.queries_df.iloc[idx]
+        if "relevant_ids" in self.queries_df.columns and pd.notna(row.get("relevant_ids")):
+            relevant_ids = str(row["relevant_ids"])
+            article_id = int(relevant_ids.split("|")[0])
+        else:
+            article_id = int(row["article_id"])
+            relevant_ids = str(article_id)
         return {
             "query_text": row["query_text"],
-            "article_id": int(row["article_id"]),
+            "article_id": article_id,
+            "relevant_ids": relevant_ids,
         }
 
 
 class RetrievalTester(pl.LightningModule):
-    """Lightning модуль для тестирования retrieval модели."""
-
     def __init__(
         self,
         config: DictConfig,
         model_name: str,
         k_values: list[int] | None = None,
     ):
-        """Инициализация тестера.
-
-        Args:
-            config: Конфигурация Hydra
-            model_name: Название модели эмбеддингов
-            k_values: Значения k для метрик
-        """
         super().__init__()
         self.config = config
         self.model_name = model_name
         self.k_values = k_values or [1, 3, 5, 10, 20]
 
-        # Сохраняем гиперпараметры
+        vs_cfg_init = config.get("vector_store") if hasattr(config, "get") else None
+        backend_init = (
+            vs_cfg_init.get("backend", "qdrant") if vs_cfg_init is not None else "qdrant"
+        )
+
         self.save_hyperparameters(
             {
                 "model_name": model_name,
                 "k_values": self.k_values,
                 "qdrant_collection": config.qdrant.collection_name,
                 "vector_size": config.qdrant.vector_size,
+                "vector_backend": backend_init,
             }
         )
 
-        # Инициализация компонентов
         self.embedding_model = None
         self.sparse_encoder = None
         self.qdrant_manager = None
+        self.vector_store: VectorStore | None = None
         self.reranker = None
         self.llm_generator = None
         self.metrics = RetrievalMetrics(k_values=self.k_values)
         self.ragas_metrics = None
+        self.rouge_metrics = RougeMetrics()
+        self.article_texts: dict[int, str] = {}
+        self.llm_latency = LatencyMetrics(name="llm")
+        self.retrieval_latency = LatencyMetrics(name="retrieval")
         self.hybrid_enabled = config.qdrant.get("hybrid", {}).get("enabled", False)
         self.reranker_enabled = config.reranker.get("enabled", False)
         self.ragas_enabled = config.ragas.get("enabled", False)
+        vs_cfg = config.get("vector_store") if hasattr(config, "get") else None
+        self.vector_backend = (
+            vs_cfg.get("backend", "qdrant") if vs_cfg is not None else "qdrant"
+        )
 
     def setup(self, stage: str | None = None) -> None:
-        """Настройка компонентов перед тестированием.
+        if stage != "test" and stage is not None:
+            return
 
-        Args:
-            stage: Стадия выполнения (fit, test, predict)
-        """
-        if stage == "test" or stage is None:
-            # Создаем конфиг для модели эмбеддингов на основе основного конфига
-            model_config = OmegaConf.create({"embedding": dict(self.config.embedding)})
-            # Переопределяем model_name, если он был передан
-            model_config.embedding.model_name = self.model_name
+        model_config = OmegaConf.create({"embedding": dict(self.config.embedding)})
+        model_config.embedding.model_name = self.model_name
 
-            print(f"Загрузка модели: {self.model_name}")
-            print(f"Устройство: {model_config.embedding.device}")
-            self.embedding_model = EmbeddingModel(model_config)
+        print(f"Загрузка модели: {self.model_name}")
+        self.embedding_model = EmbeddingModel(model_config)
+        self.config.qdrant.vector_size = self.embedding_model.get_embedding_dim()
 
-            # Обновляем vector_size в конфиге для Qdrant
-            vector_size = self.embedding_model.get_embedding_dim()
-            self.config.qdrant.vector_size = vector_size
+        if self.hybrid_enabled:
+            print("Инициализация sparse encoder...")
+            self.sparse_encoder = SparseEncoder(self.config)
 
-            # Инициализируем sparse encoder если включен гибридный режим
-            if self.hybrid_enabled:
-                print("Инициализация sparse encoder...")
-                self.sparse_encoder = SparseEncoder(self.config)
-                print("✓ Sparse encoder инициализирован")
+        self.qdrant_manager = QdrantManager(self.config)
+        self.vector_store = make_vector_store(self.config)
+        print(f"✓ Vector store backend: {self.vector_backend}")
 
-            # Инициализация Qdrant менеджера
-            self.qdrant_manager = QdrantManager(self.config)
+        if self.reranker_enabled:
+            from russian_laws.reranker import Reranker
+            print("\nИнициализация reranker...")
+            self.reranker = Reranker(self.config)
 
-            # Инициализируем reranker
-            if self.reranker_enabled:
-                from russian_laws.reranker import Reranker
+        if self.ragas_enabled:
+            print("\nИнициализация LLM для генерации ответов...")
+            self.llm_generator = LLMGenerator(self.config)
+            print("\nИнициализация RAG метрик...")
+            self.ragas_metrics = RAGASMetrics(config=self.config)
+            print(f"✓ RAG метрики (judge: {self.config.ragas.llm.model})")
 
-                print("\nИнициализация reranker...")
-                self.reranker = Reranker(self.config)
-
-            # Инициализируем LLM генератор и RAG метрики
-            if self.ragas_enabled:
-                print("\nИнициализация LLM для генерации ответов...")
-                self.llm_generator = LLMGenerator(self.config)
-                print("✓ LLM генератор инициализирован")
-
-                # Инициализируем RAG метрики (собственная реализация)
-                print("\nИнициализация RAG метрик...")
-                self.ragas_metrics = RAGASMetrics(config=self.config)
-                print(
-                    f"✓ RAG метрики инициализированы (judge: {self.config.ragas.llm.model})"
-                )
-
-            print("Компоненты инициализированы")
+        print("Компоненты инициализированы")
 
     def index_articles(self, articles_df: pd.DataFrame, batch_size: int = 32) -> None:
-        """Индексирует статьи в Qdrant с поддержкой чанкирования.
-
-        Args:
-            articles_df: DataFrame со статьями
-            batch_size: Размер батча для индексации
-        """
         indexer = ArticleIndexer(
             embedding_model=self.embedding_model,
             qdrant_manager=self.qdrant_manager,
@@ -157,23 +134,20 @@ class RetrievalTester(pl.LightningModule):
         )
         indexer.index_articles(articles_df, batch_size=batch_size)
 
+        if "article_id" in articles_df.columns and "article_text" in articles_df.columns:
+            self.article_texts = {
+                int(row["article_id"]): str(row["article_text"])
+                for _, row in articles_df[["article_id", "article_text"]].iterrows()
+            }
+
     def test_step(self, batch: dict, batch_idx: int) -> dict:
-        """Один шаг тестирования.
-
-        Args:
-            batch: Батч с данными
-            batch_idx: Индекс батча
-
-        Returns:
-            Словарь с результатами
-        """
         query_text = batch["query_text"][0]
         relevant_id = int(batch["article_id"][0])
+        relevant_ids_str = batch.get("relevant_ids", [str(relevant_id)])[0]
+        relevant_ids = [int(x) for x in str(relevant_ids_str).split("|") if x]
 
-        # Генерируем эмбеддинг для запроса
         query_embedding = self.embedding_model.encode([query_text])[0].tolist()
 
-        # Ищем в Qdrant (гибридный поиск если включен)
         max_k = max(self.k_values)
         search_limit = (
             int(self.config.reranker.get("candidates_limit", 50))
@@ -181,20 +155,24 @@ class RetrievalTester(pl.LightningModule):
             else max_k
         )
 
+        assert self.vector_store is not None
         if self.hybrid_enabled and self.sparse_encoder is not None:
             sparse_query = self.sparse_encoder.encode(query_text)
-            results = self.qdrant_manager.hybrid_search(
-                dense_vector=query_embedding,
-                sparse_vector=sparse_query,
-                limit=search_limit,
-                score_threshold=0.0,
-            )
+            with self.retrieval_latency.measure():
+                results = self.vector_store.hybrid_search(
+                    dense_vector=query_embedding,
+                    sparse_vector=sparse_query,
+                    limit=search_limit,
+                    score_threshold=0.0,
+                )
         else:
-            results = self.qdrant_manager.search(
-                query_vector=query_embedding, limit=search_limit, score_threshold=0.0
-            )
+            with self.retrieval_latency.measure():
+                results = self.vector_store.search(
+                    query_vector=query_embedding,
+                    limit=search_limit,
+                    score_threshold=0.0,
+                )
 
-        # Переранжирование
         if self.reranker_enabled and self.reranker is not None and results:
             docs = [
                 (p.payload or {}).get("parent_text")
@@ -206,39 +184,43 @@ class RetrievalTester(pl.LightningModule):
             )
             results = [results[idx] for idx in ranked_indices]
 
-        # Извлекаем ID найденных статей (убираем дубликаты, сохраняя порядок)
         retrieved_ids = []
-        seen_article_ids = set()
+        seen_article_ids: set[int] = set()
         for point in results:
             article_id = point.payload.get("article_id")
             if article_id is not None and article_id not in seen_article_ids:
                 retrieved_ids.append(article_id)
                 seen_article_ids.add(article_id)
 
-        # Обновляем метрики
-        self.metrics.update(relevant_ids=[relevant_id], retrieved_ids=retrieved_ids)
+        self.metrics.update(relevant_ids=relevant_ids, retrieved_ids=retrieved_ids)
 
-        # Генерация ответа и обновление RAGAS метрик
         if self.ragas_enabled and self.llm_generator and self.ragas_metrics:
-            # Извлекаем контексты из результатов поиска
             contexts = []
             for point in results:
-                # Используем parent_text если есть, иначе article_text
-                context = point.payload.get("parent_text") or point.payload.get(
-                    "article_text", ""
-                )
-                if context:
-                    contexts.append(context)
+                payload = point.payload or {}
+                text = payload.get("parent_text") or payload.get("article_text", "")
+                if not text:
+                    continue
+                codex = str(payload.get("codex") or "").strip()
+                num = str(payload.get("article_num") or "").strip()
+                title = str(payload.get("article_title") or "").strip()
+                header_parts = []
+                if codex:
+                    header_parts.append(codex)
+                if num and num.lower() != "nan":
+                    header_parts.append(f"ст. {num}")
+                if title:
+                    header_parts.append(title)
+                header = " | ".join(header_parts)
+                contexts.append(f"[{header}]\n{text}" if header else text)
 
-            # Генерируем ответ
             if contexts:
                 try:
-                    # Объединяем контексты в один текст
                     context_text = "\n\n".join(contexts)
-                    result = self.llm_generator.generate(query_text, context_text)
+                    with self.llm_latency.measure():
+                        result = self.llm_generator.generate(query_text, context_text)
                     answer_text = result if isinstance(result, str) else result[0]
 
-                    # Debug: показываем что передаём в RAGAS
                     print("\n[RAGAS INPUT DEBUG]")
                     print(f"  Question: {query_text[:100]}...")
                     print(
@@ -255,6 +237,12 @@ class RetrievalTester(pl.LightningModule):
                     self.ragas_metrics.update(
                         question=query_text, answer=answer_text, contexts=contexts
                     )
+
+                    reference_text = self.article_texts.get(relevant_id)
+                    if reference_text:
+                        self.rouge_metrics.update(
+                            prediction=answer_text, reference=reference_text
+                        )
                 except Exception as e:
                     print(f"Ошибка генерации ответа для RAGAS: {e}")
 
@@ -265,28 +253,29 @@ class RetrievalTester(pl.LightningModule):
         }
 
     def on_test_epoch_end(self) -> None:
-        """Вызывается в конце тестовой эпохи."""
-        # Вычисляем retrieval метрики
         metrics = self.metrics.compute()
 
-        # Вычисляем RAGAS метрики
         if self.ragas_enabled and self.ragas_metrics:
             print("\n" + "=" * 80)
             print("ВЫЧИСЛЕНИЕ RAGAS МЕТРИК")
             print("=" * 80)
-            ragas_results = self.ragas_metrics.compute()
-            metrics.update(ragas_results)
+            metrics.update(self.ragas_metrics.compute())
 
-        # Логируем метрики
+        rouge_results = self.rouge_metrics.compute()
+        if rouge_results:
+            metrics.update(rouge_results)
+
+        metrics.update(self.retrieval_latency.compute())
+        metrics.update(self.llm_latency.compute())
+
         for metric_name, value in metrics.items():
             self.log(metric_name, value, prog_bar=True)
 
-        # Выводим результаты
         print("\n" + "=" * 80)
-        print("РЕЗУЛЬТАТЫ ТЕСТИРОВАНИЯ")
+        print(f"РЕЗУЛЬТАТЫ ТЕСТИРОВАНИЯ (vector_backend = {self.vector_backend})")
         print("=" * 80)
         for metric_name, value in metrics.items():
-            print(f"{metric_name:20s}: {value:.4f}")
+            print(f"{metric_name:25s}: {value:.4f}")
         print("=" * 80)
 
 
@@ -300,41 +289,22 @@ def run_test(
     config_overrides: str = "",
     limit: int | None = None,
 ) -> dict:
-    """Запускает тестирование retrieval модели.
-
-    Args:
-        test_data: Путь к тестовым запросам
-        articles_data: Путь к статьям
-        model_name: Название модели эмбеддингов (если None, берется из конфига)
-        index_articles: Индексировать ли статьи перед тестированием
-        experiment_name: Название эксперимента MLflow
-        run_name: Название run в MLflow
-        config_overrides: Hydra-overrides через запятую (напр. "qdrant.hybrid.enabled=false,reranker.enabled=true")
-        limit: Ограничить количество тестовых запросов (для отладки)
-
-    Returns:
-        Словарь с метриками
-    """
     overrides = [o.strip() for o in config_overrides.split(",") if o.strip()]
 
     config_dir = Path("conf").absolute()
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         cfg = compose(config_name="config", overrides=overrides)
 
-    # Используем модель из конфига, если не передана явно
     model_name = model_name or cfg.embedding.model_name
 
     print("Конфигурация загружена")
     print(f"Модель эмбеддингов: {model_name}")
 
-    # Создаем MLflow логгер
     mlflow_logger = MLFlowLogger(
         experiment_name=experiment_name,
         run_name=run_name,
         tracking_uri="mlruns",
     )
-
-    # Логируем параметры
     mlflow_logger.log_hyperparams(
         {
             "model_name": model_name,
@@ -343,50 +313,71 @@ def run_test(
         }
     )
 
-    # Создаем тестер
     tester = RetrievalTester(config=cfg, model_name=model_name)
     tester.setup(stage="test")
 
-    # Загружаем данные
     print(f"\nЗагрузка тестовых данных из {test_data}")
     test_df = pd.read_csv(test_data)
+
+    # rrncb-формат: разворачиваем document → article_ids по source_file
+    if {"question", "document"}.issubset(test_df.columns) and "query_text" not in test_df.columns:
+        print("Обнаружен rrncb-формат — разворачиваю document → article_ids по source_file")
+        articles_for_map = pd.read_csv(articles_data)
+        src_to_ids = (
+            articles_for_map.dropna(subset=["source_file"])
+            .groupby("source_file")["article_id"]
+            .apply(lambda s: [int(x) for x in s.tolist()])
+            .to_dict()
+        )
+        rows = []
+        skipped = 0
+        for _, r in test_df.iterrows():
+            ids = src_to_ids.get(str(r["document"]), [])
+            if not ids:
+                skipped += 1
+                continue
+            rows.append(
+                {
+                    "query_text": str(r["question"]),
+                    "article_id": ids[0],
+                    "relevant_ids": "|".join(str(i) for i in ids),
+                }
+            )
+        if skipped:
+            print(f"  пропущено {skipped} запросов без совпадений по source_file")
+        test_df = pd.DataFrame(rows)
+
     if limit is not None:
         test_df = test_df.head(limit)
         print(f"Загружено {len(test_df)} тестовых запросов (limit={limit})")
     else:
         print(f"Загружено {len(test_df)} тестовых запросов")
 
-    # Индексируем статьи, если требуется
+    articles_df_full = pd.read_csv(articles_data)
+    if {"article_id", "article_text"}.issubset(articles_df_full.columns):
+        tester.article_texts = {
+            int(row["article_id"]): str(row["article_text"])
+            for _, row in articles_df_full[["article_id", "article_text"]].dropna().iterrows()
+        }
+
     if index_articles:
         print(f"\nЗагрузка статей из {articles_data}")
-        articles_df = pd.read_csv(articles_data)
+        articles_df = articles_df_full
 
-        # В режиме отладки ограничиваем число статей
         if limit is not None:
-            # Берём статьи, на которые ссылаются тестовые запросы + немного дополнительных
             relevant_ids = list(test_df["article_id"].tolist())
-            relevant_articles = articles_df[
-                articles_df["article_id"].isin(relevant_ids)
-            ]
-            other_articles = articles_df[
-                ~articles_df["article_id"].isin(relevant_ids)
-            ].head(limit * 10)
-            articles_df = pd.concat(
-                [relevant_articles, other_articles], ignore_index=True
-            )
-            print(
-                f"Загружено {len(articles_df)} статей (режим отладки: релевантные + {limit * 10} дополнительных)"
-            )
+            relevant_articles = articles_df[articles_df["article_id"].isin(relevant_ids)]
+            other_articles = articles_df[~articles_df["article_id"].isin(relevant_ids)].head(limit * 10)
+            articles_df = pd.concat([relevant_articles, other_articles], ignore_index=True)
+            print(f"Загружено {len(articles_df)} статей (режим отладки)")
         else:
             print(f"Загружено {len(articles_df)} статей")
 
         tester.index_articles(articles_df)
 
-    # Создаем датасет и даталоадер
     test_dataset = QueryDataset(test_df)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    # Создаем трейнер
     trainer = pl.Trainer(
         logger=mlflow_logger,
         accelerator="cpu",
@@ -395,15 +386,14 @@ def run_test(
         enable_model_summary=False,
     )
 
-    # Запускаем тестирование
     print("\nНачало тестирования...")
     trainer.test(tester, dataloaders=test_loader)
 
-    # Получаем финальные метрики
     final_metrics = tester.metrics.compute()
 
-    # Закрываем соединение
     tester.qdrant_manager.close()
+    if tester.vector_store is not None and tester.vector_backend != "qdrant":
+        tester.vector_store.close()
 
     print("\nТестирование завершено")
     print(f"MLflow experiment: {experiment_name}")
@@ -413,7 +403,6 @@ def run_test(
 
 
 def main():
-    """Точка входа для Fire CLI."""
     return {"run_test": run_test}
 
 

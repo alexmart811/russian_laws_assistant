@@ -1,0 +1,26 @@
+# BGE-M3, дообученная на русском юридическом корпусе (cocktail 40/60).
+# Архитектура BGE-M3 (XLM-RoBERTa-based): CLS pooling, L2-нормализация, без instruction prefix.
+model_name: "Roflmax/bge-m3-legal-ru-cocktail-40-60"
+device: ${oc.env:EMBEDDING_DEVICE,cuda}
+batch_size: 16
+max_length: 1024  # BGE-M3 поддерживает до 8192, 1024 — баланс качества/скорости
+
+# Параметры пулинга/нормализации под BGE-M3
+normalize: true
+pooling: cls
+
+# Параметры чанкирования (одинаковые для всех моделей)
+chunking:
+  enabled: true
+  strategy: parent_child
+
+  chunk_size: 500
+  chunk_overlap: 50
+
+  child:
+    min_size: 30
+    max_size: 300
+  parent:
+    children_per_parent: 3
+    max_size: 500
+    overlap: false

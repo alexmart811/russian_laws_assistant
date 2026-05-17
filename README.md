@@ -2,258 +2,160 @@
 
 ## Постановка задачи
 
-Разработка модуля интеллектуального поиска документов в базе данных (retriever)
-для юридического ассистента, основанного на больших языковых моделях (LLM).
+Разработка модуля интеллектуального поиска (retriever) для юридического ассистента на основе LLM. Модуль находит релевантные фрагменты законов и нормативных актов по запросу пользователя и формирует контекст для генерации ответа.
 
-На текущий момент без помощи юриста сложно быстро находить нужные статьи и
-законы в больших объёмах правовых документов. Разрабатываемый модуль retrieval
-будет помогать в этом: он сможет по конкретному запросу пользователя находить
-релевантные фрагменты законов и нормативных актов, подготавливая контекст для
-последующей обработки ассистентом.
-
-Для обеспечения корректного и точного поиска требуется обученная векторная
-модель, способная:
+Для корректного поиска требуется векторная модель, способная:
 
 - понимать контекст нормативно-правовых актов,
 - находить семантически близкие фрагменты,
-- корректно ранжировать результаты,
-- готовить контекст для последующей генерации ответа LLM.
-
-В рамках проекта разрабатывается retrieval-модель, а также создаётся векторная
-база данных, на которой будет основана работа юридического ассистента.
-
-## Формат входных и выходных данных
-
-### Входные данные
-
-**Пользовательский запрос:**
-
-- строка (str, 5–200 символов), например:
-  ```
-  "Какие штрафы предусмотрены за нарушение условий договора с поставщиком?"
-  ```
+- корректно ранжировать результаты.
 
 ## Метрики
 
-Для оценки качества системы используются метрики двух типов:
+### Retrieval
 
-### Retrieval метрики
+- **Recall@k** — найден ли правильный фрагмент среди первых k результатов
+- **MRR** — позиция первого релевантного ответа
+- **nDCG@k** — качество ранжирования с учётом позиции
 
-Оценивают качество поиска релевантных документов:
+Метрики вычисляются для k = [1, 3, 5, 10].
 
-#### 1. Recall@k
+### RAG
 
-Показывает, найден ли правильный фрагмент среди первых k результатов.
+- **Faithfulness** — соответствие ответа контексту (LLM-as-judge)
+- **Answer Relevance** — семантическая близость ответа к вопросу (embeddings)
+- **ROUGE-1/2/L** — лексическое перекрытие с эталонным текстом
 
-Высокий recall важнее precision, т.к. retrieved документы затем проходят
-reranking/LLM-обработку.
+## Конфигурация
 
-#### 2. MRR (Mean Reciprocal Rank)
-
-Отражает позицию первого релевантного ответа.
-
-#### 3. nDCG@k (Normalized Discounted Cumulative Gain)
-
-Оценивает качество ранжирования с учетом позиции релевантных результатов.
-
-### RAGAS метрики
-
-Оценивают качество генерируемых ответов (используется GPT-4o-mini как judge):
-
-#### 1. Faithfulness
-
-Измеряет, насколько сгенерированный ответ соответствует предоставленному
-контексту. Проверяет наличие "галлюцинаций" — утверждений, не подтвержденных
-исходными документами.
-
-### Текущая конфигурация
-
-- **Поиск:** Hybrid search (dense + sparse векторы, BM25)
-- **Чанкирование:** Parent-child (маленькие child-чанки для поиска, большие
-  parent-чанки для контекста LLM)
-- **Метрики вычисляются для:** k = [1, 3, 5, 10]
+- **Поиск:** Hybrid search (dense + sparse / BM25)
+- **Чанкирование:** Parent-child (маленькие child-чанки для поиска, большие parent-чанки для LLM)
+- **Модель:** `Roflmax/bge-m3-legal-ru-cocktail-40-60` (дообученная BGE-M3)
 
 ## Датасеты
 
-Используемые источники юридических данных:
+### [Russian Legal Documents](https://www.kaggle.com/datasets/nzibben/20-russian-legal-documents)
 
-### 1. [Russian Legal Documents](https://www.kaggle.com/datasets/nzibben/20-russian-legal-documents)
+~2000 страниц российских юридических документов (docx, rtf, pdf форматы, ~800К слов).
 
-Около 2000 страниц российских юридических документов. На русском языке. В
-сборнике датасетов есть файлы docx, rtf форматов (в них около 800 000 слов),
-файлы pdf формата (в них около 1 500 000 слов). Общий вес документов 118.03 Мб.
+### [Rossiyskaya Gazeta Papers](https://www.kaggle.com/datasets/athugodage/russian-legal-text-parallel-corpus)
 
-### 2. [Rossiyskaya Gazeta Papers (Russian legal texts)](https://www.kaggle.com/datasets/athugodage/russian-legal-text-parallel-corpus)
-
-Данные с веб-сайта "Российской газеты", издаваемой правительством России уже в
-формате csv. Набор данных содержит законодательные документы с 31 декабря 2008
-года по 28 ноября 2022 года. Всего в датасете 2963 семпла (154.81 Мб). Датасет
-содержит 5 колонок:
-
-- Название документа (Document Title)
-- Ссылка (Link to the original document)
-- Текст (Original document text)
-- Комментарий РГ (Rossiyskaya Gazeta comment)
-- Дата (Publication date)
+Законодательные документы с сайта «Российской газеты» (31.12.2008 — 28.11.2022), 2963 записи в формате CSV.
 
 ## Архитектура
 
-### Компоненты системы
+- **Embeddings:** `Roflmax/bge-m3-legal-ru-cocktail-40-60`
+- **Vector store:** Qdrant (hybrid search) / Milvus / Weaviate
+- **Reranker:** `BAAI/bge-reranker-v2-m3`
+- **LLM:** через OpenAI-совместимый роутер (vsellm.ru)
 
-- **Модель эмбеддингов (dense):** intfloat/multilingual-e5-large
-- **Векторная база данных:** Qdrant (с поддержкой hybrid search) + BM25
-- **LLM-генератор:** Qwen3-VL-8B (через роутер vsellm.ru)
-- **RAGAS judge:** GPT-4o-mini (для оценки качества ответов)
-- **API-сервис на FastAPI:**
-  - `/embed` — генерация эмбеддингов
-  - `/search` — гибридный поиск (dense + sparse)
-  - `/answer` — подготовка контекста для LLM
-  - `/generate` — генерация ответа на основе найденных статей
+### Пайплайн
 
-### Пайплайн обработки
+1. Предобработка текстов статей (обогащение префиксом `[кодекс | ст. № | название]`)
+2. Parent-child чанкирование
+3. Индексация dense + sparse векторов
+4. Hybrid search при запросе (dense + BM25, weighted sum fusion)
+5. Опциональный reranking через CrossEncoder
+6. Генерация ответа на основе parent-текстов
 
-1. **Предобработка текстов** законов из датасетов
-2. **Parent-child чанкирование:**
-   - Парсинг текста на параграфы (по переносам строк и точкам с запятой)
-   - Создание маленьких child-чанков (для точного поиска)
-   - Группировка в большие parent-чанки (для полного контекста LLM)
-3. **Создание векторов:**
-   - Dense векторы через multilingual-e5-large
-   - Sparse векторы через BM25 с русскими стоп-словами
-4. **Индексирование в Qdrant** с named vectors (`dense` и `sparse`)
-5. **Hybrid search** при запросе пользователя:
-   - Параллельный поиск по dense и sparse векторам
-   - Нормализация скоров (min-max)
-   - Weighted sum fusion (alpha=0.5)
-6. **Генерация ответа** с использованием parent-текстов как контекста
+## Setup
 
----
-
-## Технические детали
-
-### Setup
-
-#### Требования
+### Требования
 
 - Python 3.12+
-- [uv](https://github.com/astral-sh/uv) — менеджер пакетов и окружений
-- Qdrant — векторная база данных
+- [uv](https://github.com/astral-sh/uv)
+- Docker + Docker Compose
+- NVIDIA GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) (рекомендуется)
 
-#### Установка зависимостей
-
-Склонировать репозиторий и перейти в директорию проекта:
-
-```bash
-cd russian_laws
-```
-
-Установить зависимости проекта:
+### Установка
 
 ```bash
+cd backend
 uv sync
 ```
 
-Настроить переменные окружения:
-
-Создать файл `.env` в корне проекта (или экспортировать переменные):
+### Переменные окружения
 
 ```bash
-# API ключ для роутера LLM
-export API_KEY_ROUTER="your-api-key-here"
-
-# OpenAI API ключ (для RAGAS метрик)
-export OPENAI_API_KEY="your-openai-api-key"
-
-# Qdrant
-export QDRANT_URL="your_host"
-export QDRANT_API_KEY="your_api_key"
-
-# AWS (опционально, для работы с S3)
-export AWS_ACCESS_KEY_ID="your_access_key"
-export AWS_SECRET_ACCESS_KEY="your_secret_key"
+# backend/.env
+API_KEY_ROUTER="your-api-key"   # ключ роутера vsellm.ru
 ```
 
-#### Установка dev-зависимостей
+### Запуск (Docker Compose)
 
-Для разработки и работы с данными:
+Перед запуском убедитесь, что CSV со статьями лежит по пути `backend/data/processed/articles_parsed.csv`.
 
 ```bash
-uv sync --group dev
+docker compose up -d --build
 ```
 
-#### Настройка pre-commit
+При первом запуске:
+1. Поднимается стек Milvus (etcd + minio + milvus)
+2. Backend ждёт готовности Milvus
+3. Если коллекция `legal_docs_bge_m3_pc_hybrid` не существует — индексирует документы
+4. Запускает API на порту 8000
 
-Для автоматической проверки кода:
+При последующих запусках индексация пропускается — коллекция уже есть в Milvus.
+
+Фронтенд доступен на [http://localhost:3000](http://localhost:3000).
+
+### Локальная разработка
 
 ```bash
-uv run pre-commit install
+# Backend
+cd backend && uv run uvicorn russian_laws.api:app --port 8000 --reload
+
+# Frontend
+cd frontend && npm run dev
 ```
 
-### API
+## API
 
-#### Запуск FastAPI сервиса
+- `POST /embed` — эмбеддинг текста
+- `POST /search` — поиск релевантных статей
+- `POST /answer` — контекст для LLM
+- `POST /generate` — генерация ответа
 
-```bash
-uv run python russian_laws/api.py
-```
-
-#### Эндпоинты API
-
-После запуска сервиса доступны следующие эндпоинты:
-
-- **`POST /embed`** — генерация эмбеддинга для текста
-  ```json
-  {
-    "text": "Текст для эмбеддинга"
-  }
-  ```
-- **`POST /search`** — поиск релевантных статей
-  ```json
-  {
-    "query": "Запрос",
-    "limit": 10,
-    "score_threshold": 0.5
-  }
-  ```
-- **`POST /answer`** — подготовка контекста для LLM
-  ```json
-  {
-    "query": "Запрос",
-    "limit": 5
-  }
-  ```
-- **`POST /generate`** — генерация ответа с использованием LLM
-  ```json
-  {
-    "query": "Запрос",
-    "limit": 5,
-    "score_threshold": 0.5
-  }
-  ```
-
-### Структура проекта
+## Структура проекта
 
 ```
-russian_laws/
-├── conf/                    # Конфигурации Hydra
-│   ├── config.yaml          # Основной конфиг
-│   ├── embedding/           # Конфигурация модели эмбеддингов
-│   ├── generator/           # Конфигурация LLM-генератора
-│   ├── ragas/               # Конфигурация RAGAS метрик
-│   ├── sparse/              # Конфигурация sparse encoder (BM25)
-│   └── qdrant/              # Конфигурация Qdrant
-├── data/
-│   ├── processed/           # Обработанные данные
-│   └── raw/                 # Исходные данные
-├── russian_laws/            # Основной пакет
-│   ├── api.py               # FastAPI сервис
-│   ├── embeddings.py        # Модель эмбеддингов (dense vectors)
-│   ├── sparse_encoder.py    # BM25 sparse encoder
-│   ├── generator.py         # LLM-генератор ответов
-│   ├── indexer.py           # Индексация статей в Qdrant
-│   ├── qdrant_manager.py    # Менеджер Qdrant (hybrid search)
-│   ├── metrics.py           # Retrieval и RAGAS метрики
-│   └── test.py              # Тестирование retrieval + RAGAS
-├── scripts/                 # Вспомогательные скрипты
-└── pyproject.toml           # Зависимости проекта
+├── docker-compose.yml
+├── docker-compose.vector-stores.yml  # Запуск альтернативных хранилищ для бенчмарка
+├── backend/
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   ├── conf/                          # Hydra-конфиги
+│   │   ├── config.yaml
+│   │   ├── embedding/
+│   │   │   ├── bge_m3_legal_ru.yaml   # Дообученная BGE-M3 (продакшн)
+│   │   │   ├── default.yaml           # Базовая BGE-M3
+│   │   │   └── jina_v3.yaml
+│   │   ├── generator/default.yaml
+│   │   ├── qdrant/default.yaml        # Hybrid search параметры
+│   │   ├── reranker/default.yaml
+│   │   ├── sparse/default.yaml        # BM25 параметры
+│   │   ├── train/default.yaml
+│   │   └── vector_store/
+│   │       ├── milvus.yaml
+│   │       ├── qdrant.yaml
+│   │       └── weaviate.yaml
+│   └── russian_laws/
+│       ├── api.py                     # FastAPI
+│       ├── embeddings.py              # Dense encoder
+│       ├── sparse_encoder.py          # BM25 sparse encoder
+│       ├── generator.py               # LLM генератор
+│       ├── indexer.py                 # Чанкирование и индексация
+│       ├── qdrant_manager.py          # Hybrid search через Qdrant
+│       ├── reranker.py                # CrossEncoder reranker
+│       ├── metrics.py                 # Retrieval + RAG метрики
+│       ├── test.py                    # Тестирование (Lightning + MLflow)
+│       └── vector_stores/             # Адаптеры хранилищ
+│           ├── base.py
+│           ├── factory.py
+│           ├── milvus_store.py
+│           ├── qdrant_store.py
+│           └── weaviate_store.py
+└── frontend/
+    ├── Dockerfile
+    └── nginx.conf
 ```

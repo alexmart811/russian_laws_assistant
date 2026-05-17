@@ -19,6 +19,7 @@ dependencies = [
     "pandas>=2.3.3",
     "pypdf>=6.9.0",
     "python-dotenv>=1.0.0",
+    "pymilvus>=2.4.10",
     "qdrant-client>=1.16.2",
     "ragas>=0.4.3",
     "sentence-transformers>=5.2.3",
@@ -38,6 +39,13 @@ dev = [
     "ipykernel>=7.1.0",
     "pre-commit>=4.5.1",
     "scikit-learn>=1.8.0",
+]
+
+# Альтернативные векторные БД для latency-сравнения с Qdrant.
+# Установка: uv sync --group vector-stores-bench
+vector-stores-bench = [
+    "weaviate-client>=4.9.0",
+    "pymilvus>=2.4.10",
 ]
 
 [tool.ruff]
